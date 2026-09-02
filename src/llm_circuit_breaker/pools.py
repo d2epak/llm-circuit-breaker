@@ -25,7 +25,6 @@ def load_all_env_keys() -> Dict[str, str]:
     """Scan process environment and config files for API keys."""
     keys: Dict[str, str] = {}
     target_keys = [
-        "GEMINI_API_KEY",
         "GROQ_API_KEY",
         "CEREBRAS_API_KEY",
         "OPENROUTER_API_KEY",
@@ -66,7 +65,7 @@ class RouteDefinition:
     model: str
     pool: str  # 'coding' or 'general_agent'
     base_url: str
-    api_format: str  # 'openai' or 'gemini'
+    api_format: str  # 'openai'
     env_key: Optional[str]
     context_length: int = 65536
     max_output_tokens: int = 4096
@@ -79,33 +78,9 @@ _BROWSER_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Default Coding Pool (Claude Code, Cursor, Aider)
+# Default Coding Pool (Claude Code, Cursor, Aider) - Groq, Cerebras, OpenRouter, NVIDIA
 DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
-    # 1. Gemini 2.5 Flash (Verified working: 1M context, 2s response)
-    RouteDefinition(
-        id="gemini-25-flash-coding",
-        provider="gemini",
-        model="gemini-2.5-flash",
-        pool="coding",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
-        api_format="gemini",
-        env_key="GEMINI_API_KEY",
-        context_length=1048576,
-        max_output_tokens=8192,
-    ),
-    # 2. Mistral Codestral
-    RouteDefinition(
-        id="mistral-codestral-coding",
-        provider="mistral",
-        model="codestral-latest",
-        pool="coding",
-        base_url="https://api.mistral.ai/v1",
-        api_format="openai",
-        env_key="MISTRAL_API_KEY",
-        context_length=256000,
-        max_output_tokens=8192,
-    ),
-    # 3. Cerebras Llama 3.3 70B
+    # 1. Cerebras Llama 3.3 70B (Fast, high-fidelity tool calling)
     RouteDefinition(
         id="cerebras-llama33-coding",
         provider="cerebras",
@@ -118,7 +93,7 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 4. Groq Llama 3.3 70B Versatile
+    # 2. Groq Llama 3.3 70B Versatile (128k context)
     RouteDefinition(
         id="groq-llama33-coding",
         provider="groq",
@@ -131,7 +106,58 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 5. Local Ollama Qwen 2.5 Coder
+    # 3. OpenRouter Qwen 2.5 Coder 32B (Free)
+    RouteDefinition(
+        id="openrouter-qwencoder-coding",
+        provider="openrouter",
+        model="qwen/qwen-2.5-coder-32b-instruct:free",
+        pool="coding",
+        base_url="https://openrouter.ai/api/v1",
+        api_format="openai",
+        env_key="OPENROUTER_API_KEY",
+        context_length=32768,
+        max_output_tokens=8192,
+        headers={"User-Agent": _BROWSER_UA}
+    ),
+    # 4. OpenRouter Devstral 2512 (Free 256k context)
+    RouteDefinition(
+        id="openrouter-devstral-coding",
+        provider="openrouter",
+        model="mistralai/devstral-2512:free",
+        pool="coding",
+        base_url="https://openrouter.ai/api/v1",
+        api_format="openai",
+        env_key="OPENROUTER_API_KEY",
+        context_length=262144,
+        max_output_tokens=8192,
+        headers={"User-Agent": _BROWSER_UA}
+    ),
+    # 5. Mistral Codestral
+    RouteDefinition(
+        id="mistral-codestral-coding",
+        provider="mistral",
+        model="codestral-latest",
+        pool="coding",
+        base_url="https://api.mistral.ai/v1",
+        api_format="openai",
+        env_key="MISTRAL_API_KEY",
+        context_length=256000,
+        max_output_tokens=8192,
+    ),
+    # 6. NVIDIA NIM Nemotron 3 Ultra
+    RouteDefinition(
+        id="nvidia-nemotron-coding",
+        provider="nvidia",
+        model="nvidia/nemotron-3-ultra-550b-a55b",
+        pool="coding",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_format="openai",
+        env_key="NVIDIA_API_KEY",
+        context_length=131072,
+        max_output_tokens=8192,
+        headers={"User-Agent": _BROWSER_UA}
+    ),
+    # 7. Local Ollama Qwen 2.5 Coder
     RouteDefinition(
         id="ollama-qwencoder-coding",
         provider="ollama",
@@ -173,19 +199,46 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 3. Gemini 2.5 Flash
+    # 3. Cerebras Llama 3.1 8B
     RouteDefinition(
-        id="gemini-flash-agent",
-        provider="gemini",
-        model="gemini-2.5-flash",
+        id="cerebras-llama31-agent",
+        provider="cerebras",
+        model="llama3.1-8b",
         pool="general_agent",
-        base_url="https://generativelanguage.googleapis.com/v1beta",
-        api_format="gemini",
-        env_key="GEMINI_API_KEY",
-        context_length=1048576,
-        max_output_tokens=8192,
+        base_url="https://api.cerebras.ai/v1",
+        api_format="openai",
+        env_key="CEREBRAS_API_KEY",
+        context_length=65536,
+        max_output_tokens=4096,
+        headers={"User-Agent": _BROWSER_UA}
     ),
-    # 4. Local Ollama Qwen3
+    # 4. OpenRouter Llama 3.3 70B (Free)
+    RouteDefinition(
+        id="openrouter-llama33-agent",
+        provider="openrouter",
+        model="meta-llama/llama-3.3-70b-instruct:free",
+        pool="general_agent",
+        base_url="https://openrouter.ai/api/v1",
+        api_format="openai",
+        env_key="OPENROUTER_API_KEY",
+        context_length=65536,
+        max_output_tokens=4096,
+        headers={"User-Agent": _BROWSER_UA}
+    ),
+    # 5. NVIDIA Nemotron
+    RouteDefinition(
+        id="nvidia-nemotron-agent",
+        provider="nvidia",
+        model="nvidia/nemotron-3-ultra-550b-a55b",
+        pool="general_agent",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_format="openai",
+        env_key="NVIDIA_API_KEY",
+        context_length=65536,
+        max_output_tokens=4096,
+        headers={"User-Agent": _BROWSER_UA}
+    ),
+    # 6. Local Ollama Qwen3
     RouteDefinition(
         id="ollama-qwen3-agent",
         provider="ollama",
