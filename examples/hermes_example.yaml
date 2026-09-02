@@ -1,0 +1,19 @@
+# Hermes Agent Configuration Example with LLM Circuit Breaker
+fallback_providers:
+  - provider: nvidia
+    model: nvidia/nemotron-3-ultra-550b-a55b
+    key_env: NVIDIA_API_KEY
+    base_url: https://integrate.api.nvidia.com/v1
+  - provider: cerebras
+    model: llama3.3-70b
+    key_env: CEREBRAS_API_KEY
+    base_url: https://api.cerebras.ai/v1
+  - provider: groq
+    model: llama-3.3-70b-versatile
+    key_env: GROQ_API_KEY
+    base_url: https://api.groq.com/openai/v1
+
+auto_discover_free_fallbacks: true
+auxiliary:
+  provider: nvidia
+  model: nvidia/nemotron-3-ultra-550b-a55b

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-circuit-breaker"
+version = "0.1.0"
+authors = [
+  { name="Deepak", email="deepak@users.noreply.github.com" },
+]
+description = "Zero-downtime, self-healing multi-provider LLM failover engine with autonomous free-model discovery and context-aware routing for AI agents."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+proxy = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.22.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+llm-proxy = "llm_circuit_breaker.proxy:main"
+llm-discover = "llm_circuit_breaker.discovery:main"
+
+[project.urls]
+"Homepage" = "https://github.com/d2epak/llm-circuit-breaker"
+"Bug Tracker" = "https://github.com/d2epak/llm-circuit-breaker/issues"
