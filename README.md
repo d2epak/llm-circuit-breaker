@@ -116,6 +116,17 @@ claude
 ```
 *(Or use the 1-click script: `./examples/claude_code_setup.sh`)*
 
+##### Autonomous Long-Horizon / Overnight Runner
+For multi-hour, multi-turn autonomous engineering sessions (e.g. overnight builds or endurance tests) without human intervention:
+
+```bash
+python3 examples/durable_runner.py --goal YOUR_TASK.md --max-turns 30
+```
+This durable runner provides an outer control loop that:
+- Executes turns non-interactively with `--dangerously-skip-permissions -p`.
+- Detects zombie stalls or deadlocks with an **Activity Watchdog**.
+- Persists checkpoints in `PROGRESS.md` and restarts fresh turns with clean context until the task succeeds.
+
 #### B. Hermes Agent
 Add the custom provider to `~/.hermes/config.yaml`:
 
