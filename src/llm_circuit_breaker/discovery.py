@@ -1,7 +1,7 @@
 """Automated Model Discovery & Catalog Maintenance Engine.
 
-Discovers $0 free models, validates tool-calling support and context window,
-tracks upstream deprecations, and persists a local model catalog.
+Discovers $0 free models from live aggregator catalogs, validates tool-calling
+support, context length, tracks deprecations, and persists catalog state.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def supports_tool_calling(item: dict[str, Any]) -> bool:
         return True
     params = item.get("supported_parameters")
     if not isinstance(params, list):
-        return True  # Permissive if metadata is omitted
+        return True
     return "tools" in params
 
 
@@ -50,7 +50,7 @@ def fetch_openrouter_catalog(timeout: float = 10.0) -> list[dict[str, Any]]:
     """Fetch live catalog from OpenRouter."""
     req = urllib.request.Request(
         _OPENROUTER_CATALOG_URL,
-        headers={"User-Agent": "llm-circuit-breaker/0.1.0", "Accept": "application/json"},
+        headers={"User-Agent": "llm-circuit-breaker/0.2.0", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -59,6 +59,34 @@ def fetch_openrouter_catalog(timeout: float = 10.0) -> list[dict[str, Any]]:
     except Exception as e:
         logger.warning("Failed to fetch model catalog: %s", e)
         return []
+
+
+def is_coding_model(model_id: str, name: str = "") -> bool:
+    """Determine if a discovered model is tuned specifically for coding."""
+    combined = f"{model_id} {name}".lower()
+    coding_keywords = ["coder", "code", "devstral", "codestral", "deepseek-coder", "starcoder", "wizardcoder"]
+    return any(k in combined for k in coding_keywords)
+
+
+def load_model_catalog(catalog_path: Optional[Path] = None) -> dict[str, Any]:
+    """Load persisted model catalog from disk."""
+    path = catalog_path or _DEFAULT_CATALOG_PATH
+    if not path.exists():
+        return {"free_models": [], "deprecated_models": [], "last_updated": None}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Could not read catalog at %s: %s", path, e)
+        return {"free_models": [], "deprecated_models": [], "last_updated": None}
+
+
+def save_model_catalog(catalog: dict[str, Any], catalog_path: Optional[Path] = None) -> None:
+    """Persist catalog to disk."""
+    path = catalog_path or _DEFAULT_CATALOG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(catalog, f, indent=2)
 
 
 def discover_models(
@@ -70,117 +98,157 @@ def discover_models(
     path = catalog_path or _DEFAULT_CATALOG_PATH
     existing_catalog = load_model_catalog(path)
 
-    if not force and existing_catalog:
-        last_updated = existing_catalog.get("last_updated_epoch", 0)
-        if (time.time() - last_updated) < 86400 and existing_catalog.get("free_models"):
-            return existing_catalog
-
+    # 1. Fetch live models
     raw_models = fetch_openrouter_catalog()
-    if not raw_models and existing_catalog:
+    if not raw_models:
         return existing_catalog
 
-    known_prev_ids: Set[str] = set()
-    if existing_catalog:
-        for m in existing_catalog.get("free_models", []):
-            known_prev_ids.add(m.get("id", ""))
-
-    active_free: List[Dict[str, Any]] = []
-    current_ids: Set[str] = set()
-
+    # 2. Filter for free, tool-supporting, sufficient context models
+    current_free: List[Dict[str, Any]] = []
     for item in raw_models:
-        mid = item.get("id")
-        if not mid:
-            continue
-        current_ids.add(mid)
-
+        mid = item.get("id", "")
         pricing = item.get("pricing", {})
         context_len = int(item.get("context_length", 0) or 0)
-        is_free = is_model_free(pricing) or mid.endswith(":free")
 
-        if is_free and supports_tool_calling(item) and context_len >= min_context:
-            active_free.append({
-                "id": mid,
-                "name": item.get("name") or mid,
-                "provider": "openrouter",
-                "context_length": context_len,
-                "pricing": {"prompt": "0", "completion": "0"},
-                "supports_tools": True,
-                "description": item.get("description", ""),
-                "discovered_at": datetime.now(timezone.utc).isoformat(),
-            })
+        if not is_model_free(pricing):
+            continue
+        if not supports_tool_calling(item):
+            continue
+        if context_len < min_context:
+            continue
 
-    # Rank models: prioritize high-context and well-tested model architectures
-    def _rank(m: dict[str, Any]) -> int:
-        mid = m["id"].lower()
-        score = 0
-        if "llama-3" in mid or "llama3" in mid: score += 100
-        elif "qwen" in mid: score += 90
-        elif "deepseek" in mid: score += 80
-        elif "mistral" in mid or "gemma" in mid: score += 70
-        score += min(m.get("context_length", 0) // 1000, 100)
-        return score
+        current_free.append({
+            "id": mid,
+            "name": item.get("name", mid),
+            "context_length": context_len,
+            "pricing": pricing,
+            "supported_parameters": item.get("supported_parameters", []),
+        })
 
-    active_free.sort(key=_rank, reverse=True)
+    # Sort by context length
+    current_free.sort(key=lambda x: x["context_length"], reverse=True)
 
-    # Deprecation tracking
-    existing_deprecated = set(existing_catalog.get("deprecated_models", []) if existing_catalog else [])
-    newly_deprecated = (known_prev_ids - current_ids) if (known_prev_ids and current_ids) else set()
-    all_deprecated = sorted(list(existing_deprecated.union(newly_deprecated)))
+    # 3. Detect deprecated models
+    old_free_ids = {m["id"] for m in existing_catalog.get("free_models", [])}
+    new_free_ids = {m["id"] for m in current_free}
+    missing_ids = old_free_ids - new_free_ids
 
-    catalog = {
-        "version": "1.0",
+    all_deprecated = set(existing_catalog.get("deprecated_models", [])) | missing_ids
+
+    new_catalog = {
         "last_updated": datetime.now(timezone.utc).isoformat(),
-        "last_updated_epoch": time.time(),
-        "total_free_models_discovered": len(active_free),
-        "total_deprecated_models_tracked": len(all_deprecated),
-        "free_models": active_free,
-        "deprecated_models": all_deprecated,
+        "total_free_models_discovered": len(current_free),
+        "free_models": current_free,
+        "deprecated_models": sorted(list(all_deprecated)),
     }
 
-    save_model_catalog(catalog, path)
-    return catalog
+    save_model_catalog(new_catalog, path)
+    return new_catalog
 
 
-def save_model_catalog(catalog: dict[str, Any], path: Optional[Path] = None) -> None:
-    target = path or _DEFAULT_CATALOG_PATH
+def get_top_free_models(limit: int = 5, min_context: int = _MIN_CONTEXT_LENGTH) -> List[Dict[str, Any]]:
+    """Return top free tool-calling models sorted by context length."""
+    catalog = discover_models(min_context=min_context)
+    models = catalog.get("free_models", [])
+    return models[:limit]
+
+
+def discover_free_models(
+    min_context: int = _MIN_CONTEXT_LENGTH,
+    timeout: float = 10.0
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Categorize live models into 'coding' and 'general_agent' pools."""
+    raw_models = fetch_openrouter_catalog(timeout=timeout)
+    coding_models: List[Dict[str, Any]] = []
+    agent_models: List[Dict[str, Any]] = []
+
+    for item in raw_models:
+        mid = item.get("id", "")
+        pricing = item.get("pricing", {})
+        context_len = int(item.get("context_length", 0) or 0)
+
+        if not is_model_free(pricing):
+            continue
+        if not supports_tool_calling(item):
+            continue
+        if context_len < min_context:
+            continue
+
+        model_info = {
+            "id": mid,
+            "name": item.get("name", mid),
+            "context_length": context_len,
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "key_env": "OPENROUTER_API_KEY",
+        }
+
+        if is_coding_model(mid, item.get("name", "")):
+            coding_models.append(model_info)
+        else:
+            agent_models.append(model_info)
+
+    coding_models.sort(key=lambda x: x["context_length"], reverse=True)
+    agent_models.sort(key=lambda x: x["context_length"], reverse=True)
+
+    return {"coding": coding_models, "general_agent": agent_models}
+
+
+def register_discovered_models_to_pools(limit_per_pool: int = 4) -> None:
+    """Discover live models and register them into IsolatedPoolManager."""
+    from llm_circuit_breaker.pools import POOL_MANAGER, RouteDefinition
+
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
-            json.dump(catalog, f, indent=2)
+        discovered = discover_free_models()
+        for m in discovered.get("coding", [])[:limit_per_pool]:
+            route = RouteDefinition(
+                id=f"openrouter-discovered-{m['id'].replace('/', '-')}",
+                provider="openrouter",
+                model=m["id"],
+                pool="coding",
+                base_url=m["base_url"],
+                api_format="openai",
+                env_key=m["key_env"],
+                context_length=m["context_length"],
+                is_discovered=True,
+            )
+            POOL_MANAGER.add_discovered_route("coding", route)
+
+        for m in discovered.get("general_agent", [])[:limit_per_pool]:
+            route = RouteDefinition(
+                id=f"openrouter-discovered-{m['id'].replace('/', '-')}",
+                provider="openrouter",
+                model=m["id"],
+                pool="general_agent",
+                base_url=m["base_url"],
+                api_format="openai",
+                env_key=m["key_env"],
+                context_length=m["context_length"],
+                is_discovered=True,
+            )
+            POOL_MANAGER.add_discovered_route("general_agent", route)
     except Exception as e:
-        logger.error("Failed to save catalog to %s: %s", target, e)
-
-
-def load_model_catalog(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
-    target = path or _DEFAULT_CATALOG_PATH
-    if not target.exists():
-        return None
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def get_top_free_models(limit: int = 5, path: Optional[Path] = None) -> list[dict[str, Any]]:
-    catalog = load_model_catalog(path) or discover_models(force=False, catalog_path=path)
-    return catalog.get("free_models", [])[:limit]
+        logger.warning("Background catalog discovery failed: %s", e)
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Discover 100% free models and update local catalog")
-    parser.add_argument("--force", action="store_true", help="Force refresh catalog")
-    parser.add_argument("--limit", type=int, default=10, help="Number of models to display")
+    parser = argparse.ArgumentParser(description="Discover active $0 free LLMs with tool support")
+    parser.add_argument("--limit", type=int, default=10, help="Max models to show per pool")
+    parser.add_argument("--min-context", type=int, default=16384, help="Min context length (default: 16k)")
     args = parser.parse_args()
 
-    print("🔍 Querying provider catalog...")
-    cat = discover_models(force=args.force)
-    print(f"✅ Discovered {cat['total_free_models_discovered']} free tool-capable models (>=16k context)")
-    print(f"📦 Tracking {cat['total_deprecated_models_tracked']} deprecated models\n")
-    print(f"Top {args.limit} Free Models:")
-    for i, m in enumerate(cat.get("free_models", [])[:args.limit], 1):
-        print(f"  {i}. {m['id']} ({m['context_length']:,} tokens context)")
+    print("🔍 Querying live aggregator catalog for $0 free models with native tool support...")
+    res = discover_free_models(min_context=args.min_context)
+
+    print(f"\n💻 Coding Pool ({len(res['coding'])} discovered):")
+    for idx, m in enumerate(res["coding"][:args.limit], 1):
+        print(f"  {idx}. {m['id']} ({m['context_length']:,} tokens context)")
+
+    print(f"\n🤖 General Agent Pool ({len(res['general_agent'])} discovered):")
+    for idx, m in enumerate(res["general_agent"][:args.limit], 1):
+        print(f"  {idx}. {m['id']} ({m['context_length']:,} tokens context)")
+    print()
 
 
 if __name__ == "__main__":

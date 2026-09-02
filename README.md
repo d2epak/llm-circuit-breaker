@@ -4,12 +4,11 @@
 
 **Zero-Downtime Multi-Provider LLM Failover & Autonomous Free-Model Discovery for AI Agents**
 
-[![CI](https://github.com/d2epak/llm-circuit-breaker/actions/workflows/ci.yml/badge.svg)](https://github.com/d2epak/llm-circuit-breaker/actions/workflows/ci.yml)
 [![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://docs.python.org/3/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-*Never let a 429 rate limit, 402 credit exhaustion, or model deprecation crash your AI agent session.*
+*Run **Claude Code**, **Hermes Agent**, and **OpenClaw** simultaneously on free-tier LLM APIs without rate-limit crashes, mid-stream disconnects, or cross-agent starvation.*
 
 </div>
 
@@ -17,167 +16,166 @@
 
 ## 🚀 Why LLM Circuit Breaker?
 
-Traditional LLM wrappers and dumb HTTP proxies break down when building real **Agentic AI systems** (Hermes, Claude Code, OpenClaw, Cursor, Aider):
-- 💥 **Context Window Crashes**: Switching from a 1M token model to an 8k/32k backup causes context overflow errors.
-- 💥 **Vendor Parameter Incompatibilities**: Proprietary reasoning flags (`extra_body: {"thinking": ...}`) cause `HTTP 400: Unrecognized parameter` on standard fallback models.
-- 💥 **Turn Thrashing**: Naive fallbacks retry throttled keys on every single message turn, burning latency.
-- 💥 **Free Tier Volatility**: Free models on aggregators appear, rename, and sunset constantly.
+Autonomous coding agents (Claude Code, Cursor, Aider, Hermes Agent, OpenClaw) push LLM APIs to their absolute limits. Traditional reverse proxies and wrapper libraries break down in multi-agent environments:
 
-**LLM Circuit Breaker** solves all of these challenges with an agent-native resilience layer.
+- 💥 **Protocol Incompatibilities**: Claude Code requires Anthropic `/v1/messages` with complex `tool_use` schemas. Forwarding requests to OpenAI `/chat/completions` fails with `HTTP 400: Unrecognized parameter`.
+- 💥 **Streaming Dropouts**: Mid-stream 429s or network blips break SSE streams, terminating the agent's work session.
+- 💥 **Protobuf Schema Crashes**: Google AI Studio's 1M context Gemini models reject standard Draft-07 `$schema` tags in tool definitions.
+- 💥 **Context Window Overflow**: Failing over from a 1M context model to a 32k/64k model causes fatal `HTTP 413: context_length_exceeded` errors.
+- 💥 **Cross-Agent Starvation**: Running Claude Code and conversational agents on a shared endpoint exhausts rate limits and cascades failures across all agents.
 
-```mermaid
-graph TD
-    A[AI Agent: OpenClaw / Claude Code / Hermes] -->|LLM Request| B[Universal Failover Router]
-    B -->|Attempt #1| C[Primary Model]
-    
-    C -->|Success 200 OK| A
-    C -->|429, 402, 403, 404, 5xx, SSL| D[13-Code Error Classifier]
-    
-    D -->|Classify| E{Reason}
-    E -->|429 Rate Limit| F[Set 60s/120s Cooldown on Provider]
-    E -->|402 Balance $0| G[Fast-path Failover: Skip Retries]
-    E -->|404 Deprecated| H[Blacklist Model in Session]
-    E -->|403 WAF / Geo-block| I[Switch to Alternative Endpoint]
-    
-    F --> J[Select Next Available Provider]
-    G --> J
-    H --> J
-    I --> J
-    
-    J --> K[1. Configured Providers: Nvidia, Cerebras, Groq]
-    J --> L[2. Auto-Discovered Free Reservoir: Gemma 4, Nemotron Free]
-    
-    M[Background Catalog Discovery] -->|Fetch /v1/models| N[OpenRouter / Aggregator]
-    N -->|Filter: $0 Price + Tools + >=16k Context| L
-```
+**LLM Circuit Breaker** solves all of these challenges natively with an agent-first resilience layer.
 
 ---
 
 ## ✨ Features
 
-* 🛡️ **13-Code Error Taxonomy**: Smart classification for 429 (Rate Limits), 402 (Insufficient Credits), 403 (WAF/Cloudflare blocks), 404/400 (Deprecations), 5xx (Outages), and TLS handshake failures.
-* ⏱️ **Zero-Thrash Cooldown Memory**: Remembers rate-limit backoff timers (60s $\rightarrow$ 120s $\rightarrow$ 240s) so subsequent turns skip throttled providers instantly.
-* 🔍 **Autonomous Free-Model Discovery**: Automatically queries live aggregator catalogs, filters for **100% Free (\$0)** + **native tool-calling support** + **$\ge$16k context window**, and tracks sunsetted models.
-* 🧹 **Parameter Sanitization**: Automatically scrubs vendor-specific reasoning tags (`thinking`) to prevent HTTP 400 errors during failover.
-* 🔌 **Universal Drop-in Proxy**: Run as a local proxy (`http://127.0.0.1:8000/v1`) for instant zero-code-change integration with **Claude Code**, **Cursor**, or **Aider**.
+- 🛡️ **Dual-Pool Isolation (`coding` vs `general_agent`)**: Dedicated pools with independent cooldown timers. Claude Code's heavy token bursts never starve Hermes or OpenClaw.
+- 🔄 **Bidirectional Anthropic ↔ OpenAI Translation**: Seamlessly converts Anthropic messages, thinking blocks, and tool definitions to OpenAI format and back.
+- 🌊 **Synthetic SSE Streaming**: Buffers upstream completions and verifies HTTP 200 before emitting synthetic Anthropic SSE events. Seamless, dropout-free failovers.
+- 🧹 **Google Gemini REST Protobuf Sanitizer**: Automatically cleans tool parameter schemas (`clean_gemini_schema`) to unlock Google AI Studio's free 1,048,576 token context window.
+- 🗜️ **Dynamic Sliding-Window Context Pruner**: Automatically compacts historical `tool_result` blocks when falling back from a 1M model to a 32k/64k model without losing initial goals.
+- ⏱️ **25-Second Fast Failover**: Strict socket timeouts prevent agents from freezing on stalled upstream connections.
+- 🔍 **Autonomous $0 Model Discovery**: Queries live aggregator catalogs for verified free models with native tool support.
+- 📦 **Zero Mandatory Dependencies**: Runs 100% on Python 3 standard library (`http.server.ThreadingHTTPServer`, `urllib`).
 
 ---
 
 ## 📦 Installation
 
 ```bash
-# Basic Python Library
-pip install llm-circuit-breaker
+# Clone the repository
+git clone https://github.com/d2epak/llm-circuit-breaker.git
+cd llm-circuit-breaker
 
-# With Local Proxy Support (FastAPI + Uvicorn)
-pip install "llm-circuit-breaker[proxy]"
+# Optional: Install as an editable package
+pip install -e .
+
+# Optional: With ASGI FastAPI support
+pip install -e ".[asgi]"
 ```
 
 ---
 
-## 🛠️ Quickstart
+## 🛠️ Plug-and-Play Quickstart
 
-### 1. Direct Python Integration (OpenClaw, Custom Agents)
+### Step 1: Start the Gateway
+Run the local gateway on port `4001`:
+
+```bash
+python3 src/llm_circuit_breaker/proxy.py --port 4001
+# Or via CLI script if installed:
+# llm-proxy --port 4001
+```
+
+The gateway exposes:
+- **Claude Code (Coding Pool)**: `http://127.0.0.1:4001/v1/messages`
+- **Hermes / OpenClaw (Agent Pool)**: `http://127.0.0.1:4001/v1/chat/completions`
+- **Health Diagnostics**: `http://127.0.0.1:4001/health`
+
+---
+
+### Step 2: Configure Your Agents
+
+#### A. Claude Code
+Point Claude Code to the local gateway:
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:4001/v1"
+export ANTHROPIC_API_KEY="sk-circuit-breaker-token"
+claude
+```
+*(Or use the 1-click script: `./examples/claude_code_setup.sh`)*
+
+#### B. Hermes Agent
+Add the custom provider to `~/.hermes/config.yaml`:
+
+```yaml
+custom_providers:
+  - name: circuit-breaker
+    base_url: http://127.0.0.1:4001/v1
+    api_key: sk-circuit-breaker-token
+    model: hermes-default
+
+default_provider: circuit-breaker
+default_model: hermes-default
+```
+
+#### C. OpenClaw
+Set the OpenAI environment variables:
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:4001/v1"
+export OPENAI_API_KEY="sk-circuit-breaker-token"
+export OPENAI_MODEL_NAME="openclaw-default"
+```
+
+---
+
+## 🐍 Direct Python API
+
+For custom agents and scripts, use the `UniversalFailoverRouter` directly:
 
 ```python
 from llm_circuit_breaker import UniversalFailoverRouter, classify_api_error, FailoverReason
-import openai
-import os
 
-# Initialize router with priority keys + auto-discovered free backups
-router = UniversalFailoverRouter(configured_fallbacks=[
-    {"provider": "nvidia", "model": "nvidia/nemotron-3-ultra-550b-a55b", "base_url": "https://integrate.api.nvidia.com/v1", "key_env": "NVIDIA_API_KEY"},
-    {"provider": "cerebras", "model": "llama3.3-70b", "base_url": "https://api.cerebras.ai/v1", "key_env": "CEREBRAS_API_KEY"},
-    {"provider": "groq", "model": "llama-3.3-70b-versatile", "base_url": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY"},
-])
+# Initialize router with priority endpoints + auto-discovered free backups
+router = UniversalFailoverRouter()
 
-def execute_agent_step(messages: list):
-    while True:
-        route = router.active_provider
-        api_key = os.getenv(route.get("key_env", ""), "")
-        client = openai.OpenAI(api_key=api_key, base_url=route.get("base_url"))
+payload = {
+    "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Write a binary search algorithm in Python."}
+    ],
+    "max_tokens": 1024
+}
 
-        try:
-            response = client.chat.completions.create(
-                model=route["model"],
-                messages=messages,
-            )
-            return response.choices[0].message.content
+# Dispatch with automatic multi-provider failover
+status, response, route = router.dispatch("coding", payload)
 
-        except Exception as err:
-            classified = classify_api_error(err)
-            if not classified.should_fallback:
-                raise err
-
-            # Handle rate-limits & deprecations
-            if classified.reason in (FailoverReason.rate_limit, FailoverReason.upstream_rate_limit):
-                router.mark_cooldown(route["provider"], seconds=60.0)
-            elif classified.reason == FailoverReason.model_not_found:
-                router.mark_deprecated(route["model"])
-
-            # Switch to next healthy route
-            next_route = router.get_next_available_route(reason=classified.reason)
-            if not next_route:
-                raise RuntimeError("All LLM providers exhausted.")
+if status == 200:
+    print(response["choices"][0]["message"]["content"])
+else:
+    print("All fallback routes exhausted:", response)
 ```
 
 ---
 
-### 2. Local Proxy for Claude Code / Cursor / Aider
+## 🔍 Free-Model Discovery CLI
 
-Start the proxy:
+Find active $0 free models with native tool support right from your terminal:
+
 ```bash
-llm-proxy --port 8000
-```
-
-Point **Claude Code** to the proxy:
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8000/v1"
-claude
-```
-
----
-
-### 3. CLI Free-Model Discovery
-
-Discover active free tool-calling models right from your terminal:
-```bash
-llm-discover --limit 5
+python3 src/llm_circuit_breaker/discovery.py --limit 5
 ```
 
 ```text
-🔍 Querying provider catalog...
-✅ Discovered 18 free tool-capable models (>=16k context)
-📦 Tracking 0 deprecated models
+🔍 Querying live aggregator catalog for $0 free models with native tool support...
 
-Top 5 Free Models:
+💻 Coding Pool (8 discovered):
+  1. qwen/qwen-2.5-coder-32b-instruct:free (32,768 tokens context)
+  2. mistralai/devstral-2512:free (262,144 tokens context)
+
+🤖 General Agent Pool (14 discovered):
   1. google/gemma-4-26b-a4b-it:free (262,144 tokens context)
-  2. google/gemma-4-31b-it:free (262,144 tokens context)
-  3. inclusionai/ling-3.0-flash-fin:free (262,144 tokens context)
-  4. dots-studio/dots-3-note-preview:free (512,000 tokens context)
-  5. nvidia/nemotron-3.5-lightning:free (1,000,000 tokens context)
+  2. nvidia/nemotron-3-nano-30b-a3b:free (32,768 tokens context)
 ```
 
 ---
 
 ## 🧪 Testing
 
-Run the comprehensive unit test suite:
+Run the full self-contained unit test suite (13/13 passing):
+
 ```bash
-pytest tests/
+python3 -m unittest discover -s tests -p "test_*.py"
 ```
 
 ---
 
-## 🤝 Contributing
+## 📚 Deep-Dive Architecture
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+For detailed design notes on Protobuf schema sanitization, synthetic SSE streaming, dual-pool cooldown isolation, and context compaction algorithms, see [**`ARCHITECTURE.md`**](ARCHITECTURE.md).
 
 ---
 

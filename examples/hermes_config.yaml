@@ -1,0 +1,14 @@
+# ============================================================================
+# Drop-in configuration block for Hermes Agent (~/.hermes/config.yaml)
+# ============================================================================
+# Paste this block into your ~/.hermes/config.yaml under custom_providers:
+
+custom_providers:
+  - name: circuit-breaker
+    base_url: http://127.0.0.1:4001/v1
+    api_key: sk-circuit-breaker-token
+    model: hermes-default
+
+# Default profile settings
+default_provider: circuit-breaker
+default_model: hermes-default
