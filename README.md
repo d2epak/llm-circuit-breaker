@@ -57,6 +57,35 @@ pip install -e ".[asgi]"
 
 ---
 
+## 🔑 API Keys Configuration (Plug & Play)
+
+The gateway automatically detects which keys you have exported and routes traffic across them. **You do NOT need all 5 keys!**
+> [!TIP]
+> **Graceful Missing-Key Bypass**: If a key is not exported, that provider is simply skipped without breaking the fallback chain. The gateway will dynamically fail over across whichever providers have active keys.
+
+Export any (or all) of the 5 supported provider keys in your shell:
+
+```bash
+# 1. Cerebras (Ultra-fast ~2,000 tok/s inference, 64k context)
+export CEREBRAS_API_KEY="csk-..."
+
+# 2. Groq (Llama 3.3 70B Versatile, 131k context)
+export GROQ_API_KEY="gsk_..."
+
+# 3. OpenRouter (Free coding models: Qwen 2.5 Coder, Devstral 256k, Llama 3.3)
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+# 4. Mistral (Codestral 256k context coding specialist)
+export MISTRAL_API_KEY="..."
+
+# 5. NVIDIA NIM (Nemotron 3 Ultra 131k context)
+export NVIDIA_API_KEY="nvapi-..."
+```
+
+*(You can also place these keys in `~/.claude/.env` or `~/.hermes/.env` and the gateway will auto-load them).*
+
+---
+
 ## 🛠️ Plug-and-Play Quickstart
 
 ### Step 1: Start the Gateway

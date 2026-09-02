@@ -57,11 +57,12 @@ However, attempting to run autonomous agents directly on free-tier APIs inevitab
 |          v                                                         v              |
 |  +--------------------------------+             +-------------------------------+ |
 |  |     POOL 1: 'CODING'           |             |     POOL 2: 'GENERAL_AGENT'   | |
-|  | - Gemini 2.5 Flash (1M)        |             | - Cerebras Llama 3.3 70B      | |
-|  | - Mistral Codestral            |             | - Groq Llama 3.3 70B          | |
-|  | - Cerebras Llama 3.3 70B       |             | - Gemini 2.5 Flash            | |
-|  | - Groq Llama 3.3 70B           |             | - Discovered Free Models      | |
-|  | - Discovered $0 Coder Models   |             | - Local Ollama Qwen/Llama     | |
+|  | - Cerebras Llama 3.3 70B       |             | - Cerebras Llama 3.3 70B      | |
+|  | - Groq Llama 3.3 70B           |             | - Groq Llama 3.3 70B          | |
+|  | - OpenRouter Qwen 2.5 Coder    |             | - Cerebras Llama 3.1 8B       | |
+|  | - OpenRouter Devstral 256k     |             | - OpenRouter Llama 3.3 70B    | |
+|  | - Mistral Codestral 256k       |             | - Mistral Small               | |
+|  | - NVIDIA Nemotron 3 Ultra      |             | - NVIDIA Nemotron 3 Ultra     | |
 |  +--------------------------------+             +-------------------------------+ |
 |          |                                                         |              |
 |          +----------------------------+----------------------------+              |
@@ -122,6 +123,13 @@ Default HTTP client timeouts (60s–120s) cause agents to freeze when an upstrea
 
 ### F. Tool Argument JSON Healing
 Open-weights models frequently wrap JSON arguments in markdown code blocks (` ```json ... ``` `) or append trailing commas before closing brackets. `repair_json_string()` sanitizes these anomalies before passing tool calls to Claude Code.
+
+### G. Dynamic API Key Detection & Graceful Bypass
+Users are not required to provide API keys for all 5 providers. When `get_candidate_routes(pool)` evaluates routes:
+- If a route defines an `env_key`, the manager inspects `os.environ` and local `.env` files.
+- If that key is unset or empty, the provider is **silently bypassed**.
+- It does **not** fail the request or trigger an error; the candidate pool dynamically filters down to whichever providers have active credentials.
+- If you only export `GROQ_API_KEY` and `OPENROUTER_API_KEY`, the engine operates as a two-way failover bridge between Groq and OpenRouter.
 
 ---
 

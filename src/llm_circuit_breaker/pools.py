@@ -25,13 +25,11 @@ def load_all_env_keys() -> Dict[str, str]:
     """Scan process environment and config files for API keys."""
     keys: Dict[str, str] = {}
     target_keys = [
-        "GROQ_API_KEY",
         "CEREBRAS_API_KEY",
+        "GROQ_API_KEY",
         "OPENROUTER_API_KEY",
-        "NVIDIA_API_KEY",
         "MISTRAL_API_KEY",
-        "OLLAMA_API_KEY",
-        "HF_TOKEN"
+        "NVIDIA_API_KEY",
     ]
     for k in target_keys:
         if os.getenv(k):
@@ -78,9 +76,9 @@ _BROWSER_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Default Coding Pool (Claude Code, Cursor, Aider) - Groq, Cerebras, OpenRouter, NVIDIA
+# Default Coding Pool (Claude Code, Cursor, Aider) - 5 Core Providers: Cerebras, Groq, OpenRouter, Mistral, NVIDIA
 DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
-    # 1. Cerebras Llama 3.3 70B (Fast, high-fidelity tool calling)
+    # 1. Cerebras Llama 3.3 70B (Fastest inference, high-fidelity tool calling)
     RouteDefinition(
         id="cerebras-llama33-coding",
         provider="cerebras",
@@ -106,7 +104,7 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 3. OpenRouter Qwen 2.5 Coder 32B (Free)
+    # 3. OpenRouter Qwen 2.5 Coder 32B (Free specialist)
     RouteDefinition(
         id="openrouter-qwencoder-coding",
         provider="openrouter",
@@ -132,7 +130,7 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 5. Mistral Codestral
+    # 5. Mistral Codestral (256k context)
     RouteDefinition(
         id="mistral-codestral-coding",
         provider="mistral",
@@ -157,21 +155,9 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 7. Local Ollama Qwen 2.5 Coder
-    RouteDefinition(
-        id="ollama-qwencoder-coding",
-        provider="ollama",
-        model="qwen2.5-coder:32b",
-        pool="coding",
-        base_url="http://127.0.0.1:11434/v1",
-        api_format="openai",
-        env_key=None,
-        context_length=32768,
-        max_output_tokens=4096,
-    ),
 ]
 
-# Default General Agent Pool (Hermes Agent, OpenClaw)
+# Default General Agent Pool (Hermes Agent, OpenClaw) - 5 Core Providers: Cerebras, Groq, OpenRouter, Mistral, NVIDIA
 DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
     # 1. Cerebras Llama 3.3 70B (Fastest conversational response)
     RouteDefinition(
@@ -225,7 +211,19 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 5. NVIDIA Nemotron
+    # 5. Mistral Small
+    RouteDefinition(
+        id="mistral-small-agent",
+        provider="mistral",
+        model="mistral-small-latest",
+        pool="general_agent",
+        base_url="https://api.mistral.ai/v1",
+        api_format="openai",
+        env_key="MISTRAL_API_KEY",
+        context_length=128000,
+        max_output_tokens=4096,
+    ),
+    # 6. NVIDIA Nemotron
     RouteDefinition(
         id="nvidia-nemotron-agent",
         provider="nvidia",
@@ -237,18 +235,6 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
         context_length=65536,
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
-    ),
-    # 6. Local Ollama Qwen3
-    RouteDefinition(
-        id="ollama-qwen3-agent",
-        provider="ollama",
-        model="qwen3:8b",
-        pool="general_agent",
-        base_url="http://127.0.0.1:11434/v1",
-        api_format="openai",
-        env_key=None,
-        context_length=32768,
-        max_output_tokens=4096,
     ),
 ]
 
@@ -307,8 +293,12 @@ class IsolatedPoolManager:
             valid: List[RouteDefinition] = []
 
             for r in routes:
-                if r.env_key and r.env_key not in self.keys:
-                    continue
+                # If route requires an API key, only activate if the user exported a valid, non-empty key!
+                # If key is missing, simply skip this provider without failing the fallback!
+                if r.env_key:
+                    key_val = self.keys.get(r.env_key, "").strip()
+                    if not key_val:
+                        continue
 
                 if (pool.lower(), r.model.lower()) in self.deprecated:
                     continue
