@@ -1,0 +1,244 @@
+"""Core Request Execution Engine for Semantic Failover."""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from llm_circuit_breaker.agent.context import ContextBudget, ContextManager
+from llm_circuit_breaker.agent.tool_validation import ToolCallValidator
+from llm_circuit_breaker.breaker.circuit_breaker import CircuitBreaker
+from llm_circuit_breaker.breaker.registry import (
+    DEFAULT_BREAKER_REGISTRY,
+    CircuitBreakerRegistry,
+)
+from llm_circuit_breaker.capability.profile import Endpoint
+from llm_circuit_breaker.capability.registry import (
+    DEFAULT_CAPABILITY_REGISTRY,
+    CapabilityRegistry,
+)
+from llm_circuit_breaker.classifier import classify_failure
+from llm_circuit_breaker.errors import (
+    BreakerOpenError,
+    DeadlineExceededError,
+    NoHealthyRouteError,
+    ProbeAdmissionDeniedError,
+)
+from llm_circuit_breaker.execution.deadline import Deadline
+from llm_circuit_breaker.execution.ledger import AttemptLedger
+from llm_circuit_breaker.execution.policy import ExecutionPolicy
+from llm_circuit_breaker.health.telemetry import (
+    DEFAULT_HEALTH_STORE,
+    HealthTelemetryStore,
+)
+from llm_circuit_breaker.models import (
+    AttemptRecord,
+    FailureCategory,
+    FailureClassification,
+    FailoverReason,
+)
+from llm_circuit_breaker.protocol.ir import (
+    NormalizedRequest,
+    NormalizedResponse,
+)
+from llm_circuit_breaker.providers.adapters import (
+    DEFAULT_ADAPTER_REGISTRY,
+    ProviderAdapterRegistry,
+)
+from llm_circuit_breaker.routing.decision import RoutingDecision
+from llm_circuit_breaker.routing.requirements import RequirementVector
+from llm_circuit_breaker.routing.router import CapabilityRouter
+
+logger = logging.getLogger("llm_circuit_breaker.execution")
+
+
+class GatewayExecutor:
+    """
+    Unified execution engine implementing semantic failover:
+    failure -> classify -> recompute candidates -> adapt request/state -> execute -> validate -> continue
+    """
+
+    def __init__(
+        self,
+        capability_registry: Optional[CapabilityRegistry] = None,
+        breaker_registry: Optional[CircuitBreakerRegistry] = None,
+        adapter_registry: Optional[ProviderAdapterRegistry] = None,
+        health_store: Optional[HealthTelemetryStore] = None,
+        policy: Optional[ExecutionPolicy] = None,
+        context_manager: Optional[ContextManager] = None,
+        tool_validator: Optional[ToolCallValidator] = None,
+        router: Optional[CapabilityRouter] = None,
+    ):
+        self.capability_registry = capability_registry or DEFAULT_CAPABILITY_REGISTRY
+        self.breaker_registry = breaker_registry or DEFAULT_BREAKER_REGISTRY
+        self.adapter_registry = adapter_registry or DEFAULT_ADAPTER_REGISTRY
+        self.health_store = health_store or DEFAULT_HEALTH_STORE
+        self.policy = policy or ExecutionPolicy()
+        self.context_manager = context_manager or ContextManager()
+        self.tool_validator = tool_validator or ToolCallValidator(strict=True)
+        self.router = router or CapabilityRouter(
+            capability_registry=self.capability_registry,
+            breaker_registry=self.breaker_registry,
+        )
+
+    def execute(
+        self,
+        request: NormalizedRequest,
+        pool: str = "general_agent",
+        strategy: Optional[str] = None,
+        deadline_ms: float = 60000.0,
+        api_keys: Optional[Dict[str, str]] = None,
+    ) -> Tuple[NormalizedResponse, RoutingDecision, AttemptLedger]:
+        """
+        Execute request with bounded retries, semantic failover, and cycle protection.
+        """
+        deadline = Deadline(total_timeout_ms=deadline_ms)
+        ledger = AttemptLedger(self.policy)
+        keys = dict(api_keys or {})
+
+        # Build requirement vector from request
+        req_vector = RequirementVector(
+            require_tools=bool(request.tools),
+            minimum_context_tokens=0,
+            task_class="coding" if pool == "coding" else "general",
+        )
+
+        excluded_endpoints: List[str] = []
+        last_decision: Optional[RoutingDecision] = None
+        attempt_idx = 0
+        last_failure_reason: Optional[str] = None
+
+        while not deadline.is_expired() and ledger.total_attempts < self.policy.max_total_attempts:
+            attempt_idx += 1
+            deadline.check()
+
+            # 1. Candidate Selection
+            endpoint, decision = self.router.select_candidate(
+                requirements=req_vector,
+                pool=pool,
+                strategy=strategy,
+                request_id=request.request_id,
+                excluded_endpoints=excluded_endpoints,
+                fallback_reason=last_failure_reason,
+            )
+            last_decision = decision
+
+            if not endpoint:
+                logger.error("No candidate matches requirements in pool '%s'", pool)
+                raise NoHealthyRouteError(f"No healthy candidate available in pool '{pool}'", pool=pool)
+
+            # Check cycle & budget protection
+            try:
+                ledger.validate_next_candidate(endpoint.id)
+            except Exception as e:
+                logger.warning("Ledger validation rejected candidate %s: %s", endpoint.id, e)
+                excluded_endpoints.append(endpoint.id)
+                continue
+
+            # 2. Circuit Breaker Admission
+            breaker = self.breaker_registry.get_or_create(f"{endpoint.provider}:{endpoint.model}")
+            try:
+                breaker.acquire_permission()
+            except (BreakerOpenError, ProbeAdmissionDeniedError) as b_err:
+                logger.warning("Breaker admission denied for %s: %s", endpoint.id, b_err)
+                excluded_endpoints.append(endpoint.id)
+                continue
+
+            # 3. Context Adaptation (Budget Sizing)
+            profile = endpoint.profile or self.capability_registry.get_profile(endpoint.provider, endpoint.model)
+            budget = ContextBudget(
+                model_context_window=profile.context_window,
+                desired_output_tokens=request.max_output_tokens or 4096,
+                safety_margin_tokens=2048,
+            )
+            adapted_request, was_compacted = self.context_manager.compact(request, budget)
+
+            # 4. Prepare and Execute Request
+            adapter = self.adapter_registry.get_adapter(endpoint.provider)
+            key_val = keys.get(endpoint.env_key, "") if endpoint.env_key else ""
+            prepared = adapter.prepare_request(endpoint, adapted_request, api_key=key_val)
+
+            attempt_timeout_sec = deadline.per_attempt_timeout_seconds()
+            attempt_rec = AttemptRecord(
+                request_id=request.request_id,
+                endpoint_id=endpoint.id,
+                provider=endpoint.provider,
+                model=endpoint.model,
+                attempt_index=attempt_idx,
+                fallback_index=ledger.fallback_count,
+                compacted=was_compacted,
+            )
+
+            # Execute attempt
+            exec_result = adapter.execute(prepared, timeout_seconds=attempt_timeout_sec)
+
+            if exec_result.status_code == 200:
+                try:
+                    norm_response = adapter.normalize_response(endpoint, exec_result)
+
+                    # 5. Response / Tool Schema Validation
+                    validation_passed = True
+                    for tc in norm_response.tool_calls:
+                        # Find schema
+                        tool_schema = next((t.parameters for t in request.tools if t.name == tc.name), None)
+                        val_report = self.tool_validator.validate_tool_call(
+                            tool_name=tc.name,
+                            arguments=tc.arguments,
+                            schema=tool_schema,
+                            known_tools=[t.name for t in request.tools],
+                        )
+                        if not val_report.is_executable:
+                            logger.warning("Tool validation rejected tool call '%s': %s", tc.name, val_report.error_message)
+                            validation_passed = False
+                            break
+                        else:
+                            tc.arguments = val_report.validated_arguments
+
+                    if validation_passed:
+                        # Success!
+                        breaker.record_success(exec_result.duration_ms)
+                        self.health_store.record_success(endpoint.id, exec_result.duration_ms)
+                        attempt_rec.finish(success=True, status_code=200)
+                        ledger.record_attempt(attempt_rec)
+                        return norm_response, decision, ledger
+                    else:
+                        # Semantic failure: model returned malformed tool call
+                        classified = FailureClassification(
+                            category=FailureCategory.SEMANTIC_AGENT_FAILURE,
+                            reason=FailoverReason.malformed_tool_call,
+                            should_fallback=True,
+                            retryable=False,
+                            poisons_health=False,
+                            status_code=200,
+                            message="Model generated invalid tool arguments",
+                        )
+                except Exception as norm_err:
+                    logger.warning("Failed to normalize response from %s: %s", endpoint.id, norm_err)
+                    classified = classify_failure(norm_err, status_code=502)
+            else:
+                # Classify error
+                raw_msg = exec_result.body.decode("utf-8", errors="ignore")
+                classified = classify_failure(raw_msg, status_code=exec_result.status_code, headers=exec_result.headers)
+
+            # Record failure in breaker & health store
+            breaker.record_failure(exec_result.duration_ms, failure_classification=classified)
+            self.health_store.record_failure(
+                endpoint_id=endpoint.id,
+                latency_ms=exec_result.duration_ms,
+                error_message=classified.message[:160],
+                cooldown_seconds=classified.retry_after_seconds or (60.0 if classified.reason == FailoverReason.rate_limit else None),
+            )
+
+            attempt_rec.finish(success=False, status_code=exec_result.status_code, failure=classified)
+            ledger.record_attempt(attempt_rec)
+
+            last_failure_reason = classified.reason.value
+
+            # Fallback handling
+            if not ledger.can_attempt_endpoint(endpoint.id):
+                # Retries on this endpoint exhausted; exclude and step fallback
+                excluded_endpoints.append(endpoint.id)
+                ledger.mark_fallback()
+
+        raise NoHealthyRouteError(f"All fallback attempts exhausted for pool '{pool}'", pool=pool)

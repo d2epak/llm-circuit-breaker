@@ -125,3 +125,28 @@ This document tracks implementation progress across milestones, capturing object
 - **Results:** 100% pass on all 48 tests. Verified secure header authentication for Gemini, eliminating the credential exposure defect in URLs. Verified SSE stream structure for Claude Code and OpenAI clients.
 - **Known Limitations:** Deterministic fault-injection framework and reproducible benchmarks are needed to prove resilience claims.
 - **Next Phase:** Phase 11 (Deterministic Fault-Injection Framework) & Phase 12 (Benchmark Harness & Baseline Suite).
+
+---
+
+## Phase 11 & 12: Deterministic Fault-Injection Framework & Reproducible Benchmarks
+- **Date:** 2026-09-03
+- **Commit:** `v2-07-benchmarks-and-faults`
+- **Objective:** Build deterministic mock fault injection (status codes 429, 500, 503, 504, timeouts, malformed tool JSON, context overflows) and an automated benchmark runner executing 10 critical agent resilience scenarios (B1-B10).
+- **Files Created/Modified:**
+  - `src/llm_circuit_breaker/execution/executor.py` (`GatewayExecutor` full request lifecycle)
+  - `tests/faults/mock_provider.py` (`ProgrammableMockAdapter` and `MockFaultAction`)
+  - `tests/faults/test_fault_injection.py` (Unit tests for 503 outage, 429 Retry-After, and malformed tool fallover)
+  - `benchmarks/scenarios.py` (Scenarios B1 through B10)
+  - `benchmarks/harness.py` (`BenchmarkHarness` comparing V2 vs Direct Provider baseline)
+  - `benchmarks/run.py` (CLI runner writing `results/v2_benchmark_report.md`)
+  - `results/v2_benchmark_report.md` (Markdown report with executive comparison table)
+  - `pyproject.toml` (Configured pytest pythonpath)
+- **Tests Run:**
+  - `uv run pytest -v` (51 passed in 0.84s)
+  - `uv run python -m benchmarks.run` (10/10 scenarios passed: 100% completion rate for V2 vs 20% for baseline)
+- **Results:**
+  - Completion Rate: 100.0% (V2) vs 20.0% (Direct Baseline)
+  - Autonomous Recovery Rate: 80.0% (V2) vs 0.0% (Direct Baseline)
+  - Semantic Tool Error Rate: 0.0% (V2) vs 10.0% (Direct Baseline)
+- **Known Limitations:** The gateway HTTP server, proxy handlers, configuration files, and documentation need to be wired to the new V2 components.
+- **Next Phase:** Phase 13 (Gateway Server, Configuration & Compatibility Layer) & Phase 14 (Security, Architecture Records & Documentation).

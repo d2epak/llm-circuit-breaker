@@ -1,0 +1,152 @@
+"""Programmable Mock Provider for Deterministic Fault Injection."""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Union
+
+from llm_circuit_breaker.capability.profile import Endpoint
+from llm_circuit_breaker.protocol.ir import (
+    NormalizedRequest,
+    NormalizedResponse,
+    NormalizedToolCall,
+)
+from llm_circuit_breaker.providers.base import (
+    PreparedRequest,
+    ProviderAdapter,
+    ProviderExecutionResult,
+)
+
+
+@dataclass
+class MockFaultAction:
+    """A configured fault or response action for a mock provider."""
+    status_code: int = 200
+    headers: Dict[str, str] = field(default_factory=dict)
+    body: bytes = b"{}"
+    delay_ms: float = 0.0
+    side_effect: Optional[Callable[[], None]] = None
+
+    @classmethod
+    def success(cls, content: str = "Success", tool_calls: Optional[List[Dict[str, Any]]] = None) -> MockFaultAction:
+        message: Dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        payload = {
+            "id": "mock_success_1",
+            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls" if tool_calls else "stop"}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 25},
+        }
+        return cls(status_code=200, body=json.dumps(payload).encode("utf-8"))
+
+    @classmethod
+    def rate_limit(cls, retry_after: int = 5) -> MockFaultAction:
+        body = json.dumps({"error": {"message": "Rate limit reached", "code": 429}}).encode("utf-8")
+        return cls(status_code=429, headers={"retry-after": str(retry_after)}, body=body)
+
+    @classmethod
+    def server_error(cls, status_code: int = 500, message: str = "Internal server error") -> MockFaultAction:
+        body = json.dumps({"error": {"message": message, "code": status_code}}).encode("utf-8")
+        return cls(status_code=status_code, body=body)
+
+    @classmethod
+    def timeout(cls, duration_ms: float = 30000.0) -> MockFaultAction:
+        return cls(status_code=504, delay_ms=duration_ms, body=b'{"error": {"message": "Gateway Timeout"}}')
+
+    @classmethod
+    def context_overflow(cls) -> MockFaultAction:
+        body = json.dumps({"error": {"message": "context_length_exceeded: maximum context length is 32768 tokens", "code": 400}}).encode("utf-8")
+        return cls(status_code=400, body=body)
+
+    @classmethod
+    def malformed_tool_call(cls, tool_name: str = "bash") -> MockFaultAction:
+        # Invalid arguments (unparseable syntax or missing required keys)
+        message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "tc_malformed",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{invalid json: true,"},
+                }
+            ],
+        }
+        payload = {
+            "id": "mock_tool_fail",
+            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+        }
+        return cls(status_code=200, body=json.dumps(payload).encode("utf-8"))
+
+
+class ProgrammableMockAdapter:
+    """Mock Provider Adapter whose behavior is programmed via a sequence of MockFaultActions."""
+
+    def __init__(self, provider_id: str):
+        self.provider_id = provider_id
+        self.actions: List[MockFaultAction] = []
+        self.current_index: int = 0
+        self.call_history: List[PreparedRequest] = []
+        self._default_action = MockFaultAction.success()
+
+    def set_sequence(self, actions: List[MockFaultAction]) -> None:
+        """Program the sequence of responses for subsequent calls."""
+        self.actions = list(actions)
+        self.current_index = 0
+
+    def prepare_request(
+        self,
+        endpoint: Endpoint,
+        request: NormalizedRequest,
+        api_key: Optional[str] = None,
+    ) -> PreparedRequest:
+        return PreparedRequest(
+            url=f"mock://{endpoint.provider}/{endpoint.model}",
+            headers={"Content-Type": "application/json"},
+            body_bytes=b"{}",
+        )
+
+    def execute(
+        self,
+        prepared: PreparedRequest,
+        timeout_seconds: float,
+    ) -> ProviderExecutionResult:
+        self.call_history.append(prepared)
+
+        if self.current_index < len(self.actions):
+            action = self.actions[self.current_index]
+            self.current_index += 1
+        else:
+            action = self._default_action
+
+        if action.side_effect:
+            action.side_effect()
+
+        delay = min(action.delay_ms, timeout_seconds * 1000.0) if action.delay_ms > 0 else 10.0
+
+        if action.delay_ms >= timeout_seconds * 1000.0:
+            # Simulate real timeout breach
+            return ProviderExecutionResult(
+                status_code=504,
+                headers={},
+                body=b'{"error": {"message": "Timed out"}}',
+                duration_ms=timeout_seconds * 1000.0,
+            )
+
+        return ProviderExecutionResult(
+            status_code=action.status_code,
+            headers=action.headers,
+            body=action.body,
+            duration_ms=delay,
+        )
+
+    def normalize_response(
+        self,
+        endpoint: Endpoint,
+        result: ProviderExecutionResult,
+    ) -> NormalizedResponse:
+        from llm_circuit_breaker.protocol.openai import openai_response_to_ir
+        raw_json = json.loads(result.body.decode("utf-8"))
+        return openai_response_to_ir(raw_json)

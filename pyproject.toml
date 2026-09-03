@@ -26,9 +26,18 @@ asgi = [
     "uvicorn>=0.22.0",
     "httpx>=0.24.0",
 ]
+proxy = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.22.0",
+    "httpx>=0.24.0",
+]
 dev = [
     "pytest>=7.0.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+testpaths = ["tests"]
 
 [project.scripts]
 llm-proxy = "llm_circuit_breaker.proxy:main"

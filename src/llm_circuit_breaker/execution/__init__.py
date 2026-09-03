@@ -1,6 +1,7 @@
 """Execution Subsystem."""
 
 from llm_circuit_breaker.execution.deadline import Deadline
+from llm_circuit_breaker.execution.executor import GatewayExecutor
 from llm_circuit_breaker.execution.ledger import AttemptLedger
 from llm_circuit_breaker.execution.policy import (
     ExecutionPolicy,
@@ -14,4 +15,5 @@ __all__ = [
     "FallbackPolicy",
     "ExecutionPolicy",
     "AttemptLedger",
+    "GatewayExecutor",
 ]
