@@ -14,6 +14,10 @@ class CircuitBreakerGatewayError(Exception):
         self.details = details or {}
 
 
+GatewayError = CircuitBreakerGatewayError
+CircuitBreakerError = CircuitBreakerGatewayError
+
+
 class BreakerOpenError(CircuitBreakerGatewayError):
     """Raised when call is rejected because the target circuit breaker is in OPEN state."""
 

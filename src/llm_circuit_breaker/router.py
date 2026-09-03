@@ -21,7 +21,6 @@ from llm_circuit_breaker.translators import (
 
 logger = logging.getLogger("llm_circuit_breaker.router")
 DEFAULT_TIMEOUT = int(os.environ.get("GATEWAY_TIMEOUT", "25"))
-socket.setdefaulttimeout(DEFAULT_TIMEOUT)
 
 
 def execute_upstream_request(
@@ -39,8 +38,10 @@ def execute_upstream_request(
             "temperature": openai_payload.get("temperature", 0.7),
         }
         data = json.dumps(gemini_payload, ensure_ascii=False).encode("utf-8")
-        url = f"{route.base_url.rstrip('/')}/models/{route.model}:generateContent?key={api_key or ''}"
+        url = f"{route.base_url.rstrip('/')}/models/{route.model}:generateContent"
         headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["x-goog-api-key"] = api_key
     else:
         url = f"{route.base_url.rstrip('/')}/chat/completions"
         payload_copy = dict(openai_payload)
