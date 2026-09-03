@@ -81,13 +81,18 @@ class TestStreamingAndProviders(unittest.TestCase):
 
     def test_health_telemetry_ema_latency_tracking(self):
         store = HealthTelemetryStore(ema_alpha=0.5)
-        # Seed initial: 200ms
+        # First measurement seeds real observed latency without hardcoded bias
         store.record_success("ep-1", latency_ms=100.0)
         snap = store.get_or_create("ep-1")
-        # EMA = 0.5 * 100 + 0.5 * 200 = 150.0
+        self.assertEqual(snap.ema_latency_ms, 100.0)
+        self.assertFalse(snap.is_cold_start)
+
+        # Second measurement applies alpha EMA: 0.5 * 200 + 0.5 * 100 = 150.0
+        store.record_success("ep-1", latency_ms=200.0)
+        snap = store.get_or_create("ep-1")
         self.assertEqual(snap.ema_latency_ms, 150.0)
-        self.assertEqual(snap.total_calls, 1)
-        self.assertEqual(snap.successful_calls, 1)
+        self.assertEqual(snap.total_calls, 2)
+        self.assertEqual(snap.successful_calls, 2)
 
         # Record failure with cooldown
         store.record_failure("ep-1", latency_ms=500.0, cooldown_seconds=60.0)

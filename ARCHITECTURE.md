@@ -1,6 +1,6 @@
-# LLM Circuit Breaker V2 — Architecture Specification
+# LLM Circuit Breaker V3 — Architecture Specification
 
-This document provides a comprehensive technical reference for the architecture, subsystems, and invariants of the LLM Circuit Breaker V2 gateway.
+This document provides a comprehensive technical reference for the architecture, subsystems, and invariants of the LLM Circuit Breaker V3 gateway.
 
 ---
 
@@ -9,24 +9,32 @@ This document provides a comprehensive technical reference for the architecture,
 ```mermaid
 graph TD
     Client[AI Agents: Claude Code / Hermes / OpenClaw] -->|HTTP / SSE| Gateway[Gateway Server / Proxy]
-    Gateway --> IR[Protocol Intermediate Representation IR]
+    Gateway --> Security[Security Defense Layer\nSSRF, CRLF, Payload Limits, Redaction]
+    Security --> IR[Protocol Intermediate Representation IR]
     IR --> Router[Capability-Aware Router]
     
-    subgraph Routing & Decision Pipeline
-        Router --> HardFilter[Hard Constraint Filter\nTools, Vision, Context Size]
+    subgraph Routing & Telemetry Pipeline
+        Router --> HardFilter[Hard Constraint Filter\nTools, Vision, Context Size, Privacy]
         HardFilter --> BreakerFilter[Circuit Breaker Admission Check]
-        BreakerFilter --> Scorer[Multi-Objective Soft Scorer\nQuality, Reliability, Latency, Cost]
-        Scorer --> DecisionRecord[Explainable Decision Audit]
+        BreakerFilter --> Scorer[Real Telemetry Scorer\nObserved EMA Latency, Tool Success Rate, Cold-Start Policy]
+        Scorer --> DecisionRecord[Explainable Decision Audit Record]
     end
 
     subgraph Execution & Resilience Loop
         DecisionRecord --> Executor[Gateway Executor]
-        Executor --> ContextMgr[Budget-Aware Context Compactor]
+        Executor --> Plan[FailoverPlan Generator]
+        Executor --> ContextMgr[Budget-Aware Context Compactor\nStructured Tool Diagnostic Extraction]
         ContextMgr --> Adapter[Provider Adapter]
         Adapter --> Upstream[Upstream LLM Provider]
-        Upstream --> Classify[Hierarchical Error Classifier]
-        Classify --> BreakerEngine[Resilience4j Circuit Breaker Engine]
-        Classify --> ToolSafety[Tool Schema Validation & Safety Layer]
+        Upstream --> RespVal[Response Validator\nEmpty 200 Check & Size Bomb Defense]
+        RespVal --> Classify[Hierarchical Error Classifier\n16 Failover Reasons]
+        Classify --> BreakerEngine[Resilience4j Circuit Breaker FSM]
+        Classify --> Idempotency[Tool Execution Idempotency Ledger]
+    end
+
+    subgraph Persistence Store
+        BreakerEngine -.-> SQLite[(Optional SQLite WAL Store)]
+        Idempotency -.-> SQLite
     end
 
     Executor -->|Synthetic or True SSE| Client
@@ -42,19 +50,21 @@ The circuit breaker operates as an atomic finite state machine with 6 discrete s
 stateDiagram-v2
     [*] --> CLOSED
     CLOSED --> OPEN: Failure rate >= threshold\nOR Slow call rate >= threshold
-    OPEN --> HALF_OPEN: Wait duration expires
-    HALF_OPEN --> CLOSED: Configured probe permits succeed
-    HALF_OPEN --> OPEN: Any probe call fails
+    OPEN --> HALF_OPEN: Wait duration expires (wait_duration_open_ms)
+    HALF_OPEN --> CLOSED: Configured probe permits succeed (half_open_max_calls)
+    HALF_OPEN --> OPEN: Any probe call fails OR probe timeout elapsed
     CLOSED --> FORCED_OPEN: Administrative lock
     OPEN --> FORCED_OPEN: Administrative lock
     FORCED_OPEN --> CLOSED: Administrative reset
     CLOSED --> DISABLED: Protection disabled
+    CLOSED --> METRICS_ONLY: Passive tracking
 ```
 
-### Invariants:
-1. **Permit-Bounded Probes**: When in `HALF_OPEN`, concurrent calls are bounded to `half_open_max_calls` permits. Additional concurrent calls immediately raise `ProbeAdmissionDeniedError`.
+### Core Invariants:
+1. **Permit-Bounded Probes**: When in `HALF_OPEN`, concurrent calls are bounded strictly to `half_open_max_calls` permits. Additional concurrent callers receive `ProbeAdmissionDeniedError` and are routed to alternative candidates.
 2. **Zero Upstream Calls When OPEN**: Calls targeting an `OPEN` circuit breaker are immediately rejected with `BreakerOpenError` without placing any network load on the downstream service.
-3. **Non-Poisoning Faults**: Errors classified as `CLIENT_FAULT` or `REQUEST_INCOMPATIBILITY` (such as 413 context overflows or schema rejections) do not increment failure metrics and cannot trip the breaker.
+3. **Non-Poisoning Faults**: Errors classified as `SEMANTIC_AGENT_FAILURE`, `CLIENT_ERROR`, or `REQUEST_INCOMPATIBILITY` (such as 400 schema rejections or malformed tool JSON) do not increment failure metrics and cannot trip the breaker.
+4. **Tool Idempotency**: Side-effecting tool calls executed before a mid-stream connection drop are recorded in the `ToolExecutionLedger`. Replays on fallback providers attach cached receipts to suppress duplicate execution.
 
 ---
 
@@ -70,27 +80,30 @@ sequenceDiagram
     participant Context as Context Compactor
     participant Upstream as Provider Upstream
     participant Safety as Tool Safety Validator
+    participant Ledger as Tool Idempotency Ledger
 
     Agent->>Gateway: POST /v1/messages or /v1/chat/completions
+    Gateway->>Gateway: Sanitize Headers & Enforce Payload Limits
     Gateway->>Gateway: Translate Native Request to Protocol IR
     Gateway->>Router: Select Candidate (Requirements, Active Pool)
-    Router->>Breaker: Check Breaker State
-    Breaker-->>Router: Admitted (CLOSED or Probe Permit)
-    Router-->>Gateway: Candidate Selected (e.g. Cerebras)
-    Gateway->>Context: Verify Token Budget against Model Context
+    Router->>Breaker: Check Breaker State & Probe Permits
+    Breaker-->>Router: Admitted (CLOSED or Bounded Probe)
+    Router-->>Gateway: Candidate Selected (e.g. Anthropic)
+    Gateway->>Context: Verify Token Budget against Model Window
     Context-->>Gateway: Adapted / Compacted Request
     Gateway->>Upstream: Execute HTTP Request
     alt Upstream Fails (503 / 429 / Timeout)
         Upstream-->>Gateway: Failure Response
         Gateway->>Breaker: Record Failure (Update Sliding Window)
+        Gateway->>Gateway: Generate Observable FailoverPlan
         Gateway->>Router: Trigger Fallback (Exclude Failed Endpoint)
-        Router-->>Gateway: Next Candidate Selected (e.g. Groq)
+        Router-->>Gateway: Next Candidate Selected (e.g. Gemini)
         Gateway->>Upstream: Execute Fallback Request
     end
     Upstream-->>Gateway: 200 OK Response
-    Gateway->>Safety: Validate Tool Call Schema (Zero Hallucination)
-    Safety-->>Gateway: Validated Tool Arguments
-    Gateway->>Breaker: Record Success
+    Gateway->>Safety: Validate Tool Call Schema (Fail Closed)
+    Gateway->>Ledger: Check & Commit Tool Execution Receipt
+    Gateway->>Breaker: Record Success (Observed Latency)
     Gateway-->>Agent: SSE Stream or JSON Response
 ```
 
@@ -99,18 +112,23 @@ sequenceDiagram
 ## 4. Subsystem Details
 
 ### A. Protocol Intermediate Representation (IR)
-The gateway converts all incoming payloads into canonical `NormalizedRequest` / `NormalizedResponse` dataclasses. This eliminates $M \times N$ translator sprawl, converting provider integrations into an $O(N)$ architecture. Thinking/reasoning blocks (such as Claude 3.7 and Gemini thinking) are preserved end-to-end.
+The gateway converts all incoming payloads into canonical `NormalizedRequest` / `NormalizedResponse` dataclasses. This eliminates $M \times N$ translator sprawl, converting provider integrations into an $O(N)$ architecture. Thinking/reasoning blocks (Claude 3.7, Gemini thinking) and multi-part content are preserved end-to-end.
 
-### B. Budget-Aware Context Compaction
-When falling back from large-window models (1M tokens) to smaller-window models (32k–128k tokens), `ContextManager` applies hierarchical compaction:
-1. System instructions, root user objective, and active constraints are strictly preserved.
-2. The latest $K$ execution turns are preserved intact.
-3. Historical tool outputs in intermediate turns are truncated to head and tail excerpts.
-4. Oldest intermediate turns are evicted only if the budget remains exceeded.
+### B. Observable `FailoverPlan`
+When a candidate migration occurs, the gateway emits an immutable `FailoverPlan` recording source and target endpoints, token counts before and after compaction, remaining deadlines, and reason for failover.
 
-### C. Tool Safety Layer (Rule 3 Compliance)
-- Deterministic syntactic repairs (stripping markdown backticks, removing trailing commas) are permitted.
-- Semantic guessing is strictly prohibited. If a model generates missing required parameters or hallucinates unknown tool names, the tool call is rejected as `UNSAFE_TO_REPAIR` and clean failover to another model is triggered.
+### C. Hierarchical Context Compaction & Diagnostic Extraction
+When falling back across models with different context windows (128k $\to$ 32k tokens):
+1. System instructions, root user goals, and planted continuation secrets are strictly preserved.
+2. The latest execution turns are preserved intact.
+3. Historical tool execution logs are parsed for exit codes, error messages, and file paths; noisy multi-megabyte payloads are compressed into structured diagnostic summaries.
 
-### D. Multi-Agent Pool Isolation
-Independent routing pools (`coding` vs `general_agent`) ensure that high-velocity coding bursts from agents like Claude Code or Aider cannot starve or trip circuit breakers for conversational agents like Hermes or OpenClaw.
+### D. Tool Safety & Replay Idempotency
+- **Rule 1 (Fail Closed):** If a model generates missing required parameters, the call is rejected without guessing.
+- **Rule 2 (Syntactic Repair Only):** Markdown fences and trailing commas are repaired; argument types and parameter names are never altered.
+- **Rule 3 (Idempotent Replay):** Tool execution receipts are stored in the `ToolExecutionLedger`. Replays attach cached receipts, preventing duplicate external side-effects.
+
+### E. Security Hardening
+- SSRF prevention blocks requests to loopback (`127.0.0.1`), link-local (`169.254.169.254`), and private cloud metadata endpoints.
+- CRLF injection prevention sanitizes outbound HTTP headers.
+- Credential masking replaces API keys and bearer tokens with `[REDACTED]` in all structured logs.

@@ -25,6 +25,8 @@ class CandidateEvaluation:
     cost_score: float = 1.0
     final_score: float = 0.0
     rank: int = 0
+    is_cold_start: bool = False
+    observed_latency_ms: Optional[float] = None
 
 
 @dataclass

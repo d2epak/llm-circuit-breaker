@@ -63,6 +63,10 @@ class MockFaultAction:
     @classmethod
     def malformed_tool_call(cls, tool_name: str = "bash") -> MockFaultAction:
         # Invalid arguments (unparseable syntax or missing required keys)
+        return cls.malformed_tool_json("{invalid json: true,", tool_name=tool_name)
+
+    @classmethod
+    def malformed_tool_json(cls, raw_arguments: str, tool_name: str = "bash") -> MockFaultAction:
         message = {
             "role": "assistant",
             "content": "",
@@ -70,7 +74,7 @@ class MockFaultAction:
                 {
                     "id": "tc_malformed",
                     "type": "function",
-                    "function": {"name": tool_name, "arguments": "{invalid json: true,"},
+                    "function": {"name": tool_name, "arguments": raw_arguments},
                 }
             ],
         }
@@ -79,6 +83,29 @@ class MockFaultAction:
             "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
         }
         return cls(status_code=200, body=json.dumps(payload).encode("utf-8"))
+
+    @classmethod
+    def valid_tool_call(cls, tool_name: str, arguments: Dict[str, Any]) -> MockFaultAction:
+        message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": f"tc_{tool_name}",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": json.dumps(arguments)},
+                }
+            ],
+        }
+        payload = {
+            "id": "mock_tool_success",
+            "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}],
+        }
+        return cls(status_code=200, body=json.dumps(payload).encode("utf-8"))
+
+    @classmethod
+    def mid_stream_reset(cls, partial_content: str = "") -> MockFaultAction:
+        return cls(status_code=502, body=b'{"error": {"message": "Connection reset mid-stream"}}')
 
 
 class ProgrammableMockAdapter:

@@ -6,7 +6,12 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_circuit_breaker.agent.context import ContextBudget, ContextManager
+from llm_circuit_breaker.agent.context import ContextBudget, ContextManager, estimate_tokens
+from llm_circuit_breaker.agent.failover_plan import FailoverPlan
+from llm_circuit_breaker.agent.idempotency import (
+    DEFAULT_TOOL_LEDGER,
+    ToolExecutionLedger,
+)
 from llm_circuit_breaker.agent.tool_validation import ToolCallValidator
 from llm_circuit_breaker.breaker.circuit_breaker import CircuitBreaker
 from llm_circuit_breaker.breaker.registry import (
@@ -68,6 +73,7 @@ class GatewayExecutor:
         policy: Optional[ExecutionPolicy] = None,
         context_manager: Optional[ContextManager] = None,
         tool_validator: Optional[ToolCallValidator] = None,
+        tool_ledger: Optional[ToolExecutionLedger] = None,
         router: Optional[CapabilityRouter] = None,
     ):
         self.capability_registry = capability_registry or DEFAULT_CAPABILITY_REGISTRY
@@ -77,6 +83,7 @@ class GatewayExecutor:
         self.policy = policy or ExecutionPolicy()
         self.context_manager = context_manager or ContextManager()
         self.tool_validator = tool_validator or ToolCallValidator(strict=True)
+        self.tool_ledger = tool_ledger or DEFAULT_TOOL_LEDGER
         self.router = router or CapabilityRouter(
             capability_registry=self.capability_registry,
             breaker_registry=self.breaker_registry,
@@ -108,6 +115,7 @@ class GatewayExecutor:
         last_decision: Optional[RoutingDecision] = None
         attempt_idx = 0
         last_failure_reason: Optional[str] = None
+        last_endpoint: Optional[Endpoint] = None
 
         while not deadline.is_expired() and ledger.total_attempts < self.policy.max_total_attempts:
             attempt_idx += 1
@@ -154,6 +162,23 @@ class GatewayExecutor:
             )
             adapted_request, was_compacted = self.context_manager.compact(request, budget)
 
+            # Record observable FailoverPlan if switching endpoints
+            if last_endpoint and last_endpoint.id != endpoint.id:
+                fplan = FailoverPlan(
+                    request_id=request.request_id,
+                    source_endpoint=last_endpoint.id,
+                    target_endpoint=endpoint.id,
+                    failover_reason=last_failure_reason or "endpoint_failover",
+                    context_tokens_before=estimate_tokens(request),
+                    context_tokens_after=estimate_tokens(adapted_request),
+                    context_compaction_applied=was_compacted,
+                    remaining_deadline_ms=deadline.remaining_ms(),
+                )
+                ledger.record_failover_plan(fplan)
+                logger.info("Semantic FailoverPlan created: %s -> %s (reason: %s)", last_endpoint.id, endpoint.id, fplan.failover_reason)
+
+            last_endpoint = endpoint
+
             # 4. Prepare and Execute Request
             adapter = self.adapter_registry.get_adapter(endpoint.provider)
             key_val = keys.get(endpoint.env_key, "") if endpoint.env_key else ""
@@ -177,9 +202,29 @@ class GatewayExecutor:
                 try:
                     norm_response = adapter.normalize_response(endpoint, exec_result)
 
-                    # 5. Response / Tool Schema Validation
+                    # 5. Response / Tool Schema Validation and Idempotency
                     validation_passed = True
                     for tc in norm_response.tool_calls:
+                        tc_id = f"att_{attempt_idx}_{tc.id or tc.name}"
+                        tc.id = tc_id
+                        # Register in tool ledger
+                        self.tool_ledger.register_tool_call(
+                            tool_call_id=tc_id,
+                            logical_operation_id=request.request_id,
+                            tool_name=tc.name,
+                            arguments=tc.arguments,
+                        )
+
+                        # Check idempotency receipt
+                        has_receipt, cached_receipt = self.tool_ledger.check_idempotency(
+                            logical_operation_id=request.request_id,
+                            tool_name=tc.name,
+                            arguments=tc.arguments,
+                        )
+                        if has_receipt:
+                            logger.info("Idempotent tool call detected for '%s'; using cached execution receipt", tc.name)
+                            tc.metadata["execution_receipt"] = cached_receipt
+
                         # Find schema
                         tool_schema = next((t.parameters for t in request.tools if t.name == tc.name), None)
                         val_report = self.tool_validator.validate_tool_call(
@@ -190,10 +235,12 @@ class GatewayExecutor:
                         )
                         if not val_report.is_executable:
                             logger.warning("Tool validation rejected tool call '%s': %s", tc.name, val_report.error_message)
+                            self.tool_ledger.mark_failed(tc_id, val_report.error_message)
                             validation_passed = False
                             break
                         else:
                             tc.arguments = val_report.validated_arguments
+                            self.tool_ledger.mark_validated(tc_id)
 
                     if validation_passed:
                         # Success!
@@ -201,6 +248,13 @@ class GatewayExecutor:
                         self.health_store.record_success(endpoint.id, exec_result.duration_ms)
                         attempt_rec.finish(success=True, status_code=200)
                         ledger.record_attempt(attempt_rec)
+
+                        # Estimate cost
+                        in_tokens = estimate_tokens(adapted_request)
+                        out_tokens = estimate_tokens(norm_response.content or "")
+                        cost = ((in_tokens / 1_000_000.0) * profile.input_price_per_1m) + ((out_tokens / 1_000_000.0) * profile.output_price_per_1m)
+                        ledger.add_cost(cost)
+
                         return norm_response, decision, ledger
                     else:
                         # Semantic failure: model returned malformed tool call

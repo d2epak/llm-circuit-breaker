@@ -22,6 +22,14 @@ class AttemptLedger:
         self._endpoints_attempted: List[str] = []
         self._endpoint_counts: dict[str, int] = {}
         self.fallback_count: int = 0
+        self.accumulated_cost_usd: float = 0.0
+        self.failover_plans: List[Any] = []
+
+    def record_failover_plan(self, plan: Any) -> None:
+        self.failover_plans.append(plan)
+
+    def add_cost(self, cost_usd: float) -> None:
+        self.accumulated_cost_usd += max(0.0, cost_usd)
 
     @property
     def total_attempts(self) -> int:

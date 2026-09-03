@@ -89,6 +89,13 @@ class TestDeterministicFaultInjection(unittest.TestCase):
         self.assertEqual(ledger.attempts[1].endpoint_id, "ep-b")
         self.assertEqual(ledger.attempts[1].status_code, 200)
 
+        # Verify FailoverPlan was recorded
+        self.assertEqual(len(ledger.failover_plans), 1)
+        plan = ledger.failover_plans[0]
+        self.assertEqual(plan.source_endpoint, "ep-a")
+        self.assertEqual(plan.target_endpoint, "ep-b")
+        self.assertEqual(plan.failover_reason, "overloaded")
+
     def test_fault_429_rate_limit_with_retry_after(self):
         # Primary returns 429 with Retry-After: 60; Secondary succeeds
         self.mock_a.set_sequence([MockFaultAction.rate_limit(retry_after=60)])

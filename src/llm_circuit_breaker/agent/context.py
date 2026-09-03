@@ -1,10 +1,11 @@
-"""Budget-Aware Context Manager and History Compactor."""
+"""Budget-Aware Context Manager and Structured Semantic Compactor."""
 
 from __future__ import annotations
 
 import copy
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,6 +44,70 @@ def estimate_tokens(payload: Any) -> int:
     return max(1, (text_len + 3) // 4)
 
 
+def extract_structured_tool_summary(raw_content: str, max_chars: int = 500) -> str:
+    """
+    Extract structured diagnostic information from tool outputs rather than blind text slicing.
+    Preserves exit codes, error messages, stack traces, paths, and status keys.
+    """
+    if len(raw_content) <= max_chars:
+        return raw_content
+
+    # 1. Attempt JSON structured extraction
+    try:
+        data = json.loads(raw_content)
+        if isinstance(data, dict):
+            extracted = {}
+            for k in ["status", "exit_code", "returncode", "error", "errors", "message", "path", "file", "id", "count"]:
+                if k in data:
+                    extracted[k] = data[k]
+            if extracted:
+                return (
+                    f"[Structured Tool Output Summary (by Circuit Breaker)]:\n"
+                    f"{json.dumps(extracted, ensure_ascii=False, indent=2)}\n"
+                    f"... (remaining payload truncated to preserve context budget)"
+                )
+    except Exception:
+        pass
+
+    # 2. Text / Log file extraction: hunt for diagnostic lines
+    lines = raw_content.splitlines()
+    if len(lines) <= 2:
+        return (
+            "[Historical Tool Output compacted by Circuit Breaker to fit target budget]\n"
+            + raw_content[:max_chars // 2]
+            + "\n... [truncated] ...\n"
+            + raw_content[-(max_chars // 2):]
+        )
+
+    error_patterns = re.compile(r"(error|exception|fail|fatal|critical|traceback|exit code|returncode)", re.IGNORECASE)
+    diagnostic_lines = [ln.strip() for ln in lines if error_patterns.search(ln)]
+
+    header_lines = lines[:2]
+    tail_lines = lines[-2:]
+
+    parts = [
+        "[Historical Tool Output compacted by Circuit Breaker to fit target budget]",
+        f"--- HEAD ({len(lines)} total lines) ---",
+        "\n".join(header_lines),
+    ]
+
+    if diagnostic_lines:
+        parts.extend([
+            "--- EXTRACTED DIAGNOSTICS & ERRORS ---",
+            "\n".join(diagnostic_lines[:4]),
+        ])
+
+    parts.extend([
+        "--- TAIL ---",
+        "\n".join(tail_lines),
+    ])
+
+    summary = "\n".join(parts)
+    if len(summary) > max_chars:
+        summary = summary[:max_chars] + "\n... [truncated]"
+    return summary
+
+
 @dataclass
 class ContextBudget:
     """Model context window and reserved output token budget."""
@@ -59,13 +124,13 @@ class ContextBudget:
 class ContextManager:
     """
     Manages request context size, enforcing explicit token budgets and hierarchical compaction.
-    Preservation priority:
-    1. System instructions
-    2. Root user objective (first user prompt)
-    3. Active constraints
-    4. Recent execution turns (latest 6 turns)
-    5. Summarize older tool outputs (truncate large terminal/file dumps)
-    6. Evict oldest intermediate pairs if still exceeding budget.
+    Compaction hierarchy:
+    1. System instructions (never dropped)
+    2. Root user objective (first user prompt, never dropped)
+    3. Active constraints (never dropped)
+    4. Recent execution turns (latest preserve_tail_turns intact)
+    5. Structured tool result summaries (preserving exit codes, errors, paths)
+    6. Evict oldest intermediate pairs between root objective and recent tail turns.
     """
 
     def __init__(self, preserve_tail_turns: int = 6):
@@ -95,33 +160,24 @@ class ContextManager:
         messages = compacted.messages
 
         if len(messages) <= (self.preserve_tail_turns + 2):
-            # Too few messages to drop; perform aggressive truncation on content
+            # Too few messages to drop turns; compact content in place
             for m in messages:
                 for tr in m.tool_results:
-                    if len(tr.content) > 500:
-                        tr.content = (
-                            tr.content[:200]
-                            + "\n... [Tool output compacted by Circuit Breaker] ...\n"
-                            + tr.content[-200:]
-                        )
+                    if len(tr.content) > 400:
+                        tr.content = extract_structured_tool_summary(tr.content, max_chars=400)
             return compacted, True
 
-        # Phase 1: Compact historical tool results in older turns
-        # Keep index 0/1 (root prompt) and latest preserve_tail_turns intact
+        # Phase 1: Structured semantic compaction of historical tool results in older turns
         cutoff_idx = len(messages) - self.preserve_tail_turns
         for idx in range(1, cutoff_idx):
             m = messages[idx]
             for tr in m.tool_results:
-                if len(tr.content) > 500:
-                    tr.content = (
-                        tr.content[:200]
-                        + "\n... [Historical output compacted by Circuit Breaker to fit target budget] ...\n"
-                        + tr.content[-200:]
-                    )
+                if len(tr.content) > 400:
+                    tr.content = extract_structured_tool_summary(tr.content, max_chars=400)
             if m.content and len(m.content) > 1000 and m.role == "assistant":
                 m.content = (
                     m.content[:400]
-                    + "\n... [Prior assistant reasoning compacted] ...\n"
+                    + "\n... [Prior assistant reasoning compacted by Circuit Breaker] ...\n"
                     + m.content[-400:]
                 )
 

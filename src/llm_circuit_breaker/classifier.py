@@ -88,6 +88,11 @@ _TOOL_MALFORMED_PATTERNS = [
     "failed to parse function arguments",
     "invalid json in tool arguments",
     "invalid_tool_call",
+    "missing required argument",
+    "missing required parameter",
+    "invalid tool argument",
+    "unknown tool",
+    "schema validation failed",
 ]
 
 _CLIENT_FAULT_PATTERNS = [

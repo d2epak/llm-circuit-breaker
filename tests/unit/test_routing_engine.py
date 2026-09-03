@@ -100,13 +100,30 @@ class TestRoutingEngine(unittest.TestCase):
 
     def test_explainable_routing_decision_record(self):
         req = RequirementVector(require_tools=True)
-        ep, dec = self.router.select_candidate(req, pool="coding", request_id="req-12345")
+        ep, dec = self.router.select_candidate(req, pool="coding", strategy="priority", request_id="req-12345")
 
         d = dec.to_dict()
         self.assertEqual(d["request_id"], "req-12345")
         self.assertEqual(d["total_considered"], 3)
         self.assertEqual(d["total_eligible"], 2)  # groq and gemini
         self.assertIn("groq/llama-3.3-70b", d["selected"])
+
+    def test_observed_telemetry_affects_routing_and_cold_start_policy(self):
+        # Record observed telemetry in health store
+        self.router.health_store.record_success(self.ep1.id, latency_ms=45.0)
+        self.router.health_store.record_success(self.ep3.id, latency_ms=2500.0)
+
+        req = RequirementVector(require_tools=True)
+        ep, dec = self.router.select_candidate(req, pool="coding", strategy="latency_aware")
+
+        self.assertEqual(ep.id, self.ep1.id)
+        evals = {c.endpoint_id: c for c in dec.evaluated_candidates}
+        self.assertFalse(evals[self.ep1.id].is_cold_start)
+        self.assertEqual(evals[self.ep1.id].observed_latency_ms, 45.0)
+        self.assertGreater(evals[self.ep1.id].latency_score, evals[self.ep3.id].latency_score)
+
+        # ep2 has no recorded calls -> must be marked is_cold_start
+        self.assertTrue(evals[self.ep2.id].is_cold_start)
 
 
 if __name__ == "__main__":

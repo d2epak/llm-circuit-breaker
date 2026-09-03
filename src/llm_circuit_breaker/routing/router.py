@@ -34,10 +34,13 @@ class CapabilityRouter:
         self,
         capability_registry: Optional[CapabilityRegistry] = None,
         breaker_registry: Optional[CircuitBreakerRegistry] = None,
+        health_store: Optional[Any] = None,
         default_strategy: str = "balanced",
     ):
         self.capability_registry = capability_registry or DEFAULT_CAPABILITY_REGISTRY
         self.breaker_registry = breaker_registry or DEFAULT_BREAKER_REGISTRY
+        from llm_circuit_breaker.health.telemetry import DEFAULT_HEALTH_STORE
+        self.health_store = health_store or DEFAULT_HEALTH_STORE
         self.default_strategy = default_strategy
         self.scorer = RoutingScorer()
 
@@ -89,6 +92,7 @@ class CapabilityRouter:
             # 1. Hard constraint filter
             passed, reason = requirements.matches_hard_constraints(profile)
             if not passed:
+                health_snap = self.health_store.get_or_create(ep.id, provider=ep.provider, model=ep.model)
                 evaluations.append(
                     CandidateEvaluation(
                         endpoint_id=ep.id,
@@ -97,6 +101,7 @@ class CapabilityRouter:
                         eligible=False,
                         hard_constraints_passed=False,
                         exclusion_reason=reason,
+                        is_cold_start=health_snap.is_cold_start,
                     )
                 )
                 continue
@@ -105,6 +110,7 @@ class CapabilityRouter:
             breaker = self.breaker_registry.get_or_create(f"{ep.provider}:{ep.model}")
             breaker_state = breaker.state
             if breaker_state == CircuitBreakerState.OPEN or breaker_state == CircuitBreakerState.FORCED_OPEN:
+                health_snap = self.health_store.get_or_create(ep.id, provider=ep.provider, model=ep.model)
                 evaluations.append(
                     CandidateEvaluation(
                         endpoint_id=ep.id,
@@ -113,17 +119,17 @@ class CapabilityRouter:
                         eligible=False,
                         breaker_state=breaker_state.value,
                         exclusion_reason=f"Circuit breaker is {breaker_state.value}",
+                        is_cold_start=health_snap.is_cold_start,
                     )
                 )
                 continue
 
-            # 3. Soft scoring
-            metrics_snap = breaker.snapshot().get("metrics", {})
+            # 3. Soft scoring with real observed telemetry
+            health_snap = self.health_store.get_or_create(ep.id, provider=ep.provider, model=ep.model)
             eval_record = self.scorer.score_candidate(
                 endpoint=ep,
                 breaker_state=breaker_state,
-                latency_ms=200.0,
-                failure_rate=metrics_snap.get("failure_rate", 0.0),
+                health=health_snap,
             )
             evaluations.append(eval_record)
             eligible_endpoints.append((ep, eval_record))

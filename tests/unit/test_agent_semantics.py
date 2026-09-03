@@ -105,6 +105,43 @@ class TestAgentSemantics(unittest.TestCase):
         # 3. Massive tool output was compacted
         self.assertIn("compacted by Circuit Breaker", compacted_req.messages[2].tool_results[0].content)
 
+    def test_deep_planted_critical_fact_and_tool_diagnostics_survival(self):
+        # 1. Embed critical diagnostic inside large log dump (middle of log)
+        noisy_header = "\n".join([f"INFO: Log header line {i}" for i in range(20)])
+        critical_error = "FATAL_CRITICAL_DATABASE_ERROR: connection refused at /var/run/pg.sock exit code 137"
+        noisy_tail = "\n".join([f"DEBUG: Processing chunk {i} with extensive diagnostic dump memory register dump trace" for i in range(500)])
+        raw_log = f"{noisy_header}\n{critical_error}\n{noisy_tail}"
+
+        req = NormalizedRequest(
+            model="large-model",
+            system_instruction="Preserve critical data.",
+            messages=[
+                NormalizedMessage(role="user", content="MISSION: Deploy cluster to production /etc/cluster/config.yaml"),
+                NormalizedMessage(role="assistant", content="Running diagnostics..."),
+                NormalizedMessage(
+                    role="user",
+                    content="",
+                    tool_results=[
+                        NormalizedToolResult(tool_call_id="call_diag", tool_name="system_diag", content=raw_log)
+                    ],
+                ),
+                NormalizedMessage(role="assistant", content="Analyzing logs..."),
+                NormalizedMessage(role="user", content="What failed?"),
+            ],
+        )
+
+        budget = ContextBudget(model_context_window=2000, desired_output_tokens=500, safety_margin_tokens=200)
+        manager = ContextManager(preserve_tail_turns=2)
+
+        compacted, was_compacted = manager.compact(req, budget)
+
+        self.assertTrue(was_compacted)
+        self.assertIn("MISSION: Deploy cluster to production /etc/cluster/config.yaml", compacted.messages[0].content)
+        # Verify the structured tool extractor extracted the exact diagnostic line!
+        compacted_tool_res = compacted.messages[2].tool_results[0].content
+        self.assertIn(critical_error, compacted_tool_res)
+        self.assertIn("EXTRACTED DIAGNOSTICS & ERRORS", compacted_tool_res)
+
 
 if __name__ == "__main__":
     unittest.main()
