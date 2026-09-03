@@ -61,3 +61,27 @@ This document tracks implementation progress across milestones, capturing object
 - **Results:** 100% pass on all 29 tests. Protocol IR accurately preserves tool definitions, reasoning/thinking blocks, multi-turn tool call IDs, and system instructions across translations.
 - **Known Limitations:** Routing and execution subsystems still need to be updated to consume the IR and capability profiles.
 - **Next Phase:** Phase 5 (Routing & Scoring Subsystem) & Phase 6 (Execution Engine, Deadlines & Retries).
+
+---
+
+## Phase 5 & 6: Routing & Scoring Engine, Deadlines & Policy Engine
+- **Date:** 2026-09-03
+- **Commit:** `v2-04-routing-and-execution`
+- **Objective:** Build capability-aware candidate selection with hard constraint filters, multi-objective soft scoring (quality, reliability, latency, cost), deadline tracking with remaining budget enforcement, bounded retries with jittered backoff, and fallback cycle protection.
+- **Files Created/Modified:**
+  - `src/llm_circuit_breaker/routing/requirements.py` (`RequirementVector` with hard constraint matcher)
+  - `src/llm_circuit_breaker/routing/decision.py` (`CandidateEvaluation` and `RoutingDecision` audit record)
+  - `src/llm_circuit_breaker/routing/scorer.py` (`RoutingScorer` with normalized multi-objective scoring)
+  - `src/llm_circuit_breaker/routing/router.py` (`CapabilityRouter` with priority, round-robin, latency-aware, cost-aware, and balanced selection)
+  - `src/llm_circuit_breaker/routing/__init__.py`
+  - `src/llm_circuit_breaker/execution/deadline.py` (`Deadline` with per-attempt timeout bounded by total remaining deadline)
+  - `src/llm_circuit_breaker/execution/policy.py` (`RetryPolicy` with jitter/Retry-After and `FallbackPolicy`)
+  - `src/llm_circuit_breaker/execution/ledger.py` (`AttemptLedger` with cycle detection and budget bounds)
+  - `src/llm_circuit_breaker/execution/__init__.py`
+  - `tests/unit/test_routing_engine.py` (Tests for tool requirements, context limits, breaker exclusions, and decision audit records)
+  - `tests/unit/test_execution_policy.py` (Tests for deadline math, backoff, cycle detection, and fallback budgets)
+- **Tests Run:**
+  - `uv run pytest -v` (37 passed in 0.82s)
+- **Results:** 100% pass on all 37 tests. Proved that hard constraints are never overridden by soft scores, cycle detection prevents infinite loops, and deadline calculations dynamically bound attempt timeouts.
+- **Known Limitations:** Agent semantics (tool schema validation, agent state snapshots, context compaction) are the next requirements.
+- **Next Phase:** Phase 7 (Tool Validation & Safety Layer) & Phase 8 (Agent Semantic State & Context Adaptation).
