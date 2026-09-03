@@ -104,3 +104,24 @@ This document tracks implementation progress across milestones, capturing object
 - **Results:** 100% pass on all 44 tests. Verified Rule 3 compliance: missing tool arguments are rejected without guessing, markdown fences are safely stripped, and planted root goals remain intact through budget-driven compaction.
 - **Known Limitations:** Streaming modes, provider adapters, and deterministic fault-injection harness are needed next.
 - **Next Phase:** Phase 9 (Streaming Architecture) & Phase 10 (Provider Adapters & Health Telemetry).
+
+---
+
+## Phase 9 & 10: Streaming Architecture, Provider Adapters & Health Telemetry
+- **Date:** 2026-09-03
+- **Commit:** `v2-06-streaming-and-providers`
+- **Objective:** Establish true and synthetic streaming modes with explicit mid-stream failure recovery policies, clean provider adapters for OpenAI, Anthropic, and Gemini (fixing URL query credential transport via secure headers), and rolling health telemetry.
+- **Files Created/Modified:**
+  - `src/llm_circuit_breaker/streaming/modes.py` (`StreamingMode`, `MidStreamFailurePolicy`, and SSE generators for Anthropic and OpenAI)
+  - `src/llm_circuit_breaker/streaming/__init__.py`
+  - `src/llm_circuit_breaker/providers/base.py` (`ProviderAdapter` protocol and `PreparedRequest`)
+  - `src/llm_circuit_breaker/providers/adapters.py` (`OpenAICompatibleAdapter`, `AnthropicAdapter`, and `GeminiAdapter` with `x-goog-api-key` header auth)
+  - `src/llm_circuit_breaker/providers/__init__.py`
+  - `src/llm_circuit_breaker/health/telemetry.py` (`HealthTelemetryStore` tracking EMA latency, consecutive failures, and cooldowns)
+  - `src/llm_circuit_breaker/health/__init__.py`
+  - `tests/unit/test_streaming_and_providers.py` (Tests for synthetic Anthropic and OpenAI SSE streams, secure Gemini header auth, and EMA health tracking)
+- **Tests Run:**
+  - `uv run pytest -v` (48 passed in 0.81s)
+- **Results:** 100% pass on all 48 tests. Verified secure header authentication for Gemini, eliminating the credential exposure defect in URLs. Verified SSE stream structure for Claude Code and OpenAI clients.
+- **Known Limitations:** Deterministic fault-injection framework and reproducible benchmarks are needed to prove resilience claims.
+- **Next Phase:** Phase 11 (Deterministic Fault-Injection Framework) & Phase 12 (Benchmark Harness & Baseline Suite).
