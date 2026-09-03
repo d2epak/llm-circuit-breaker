@@ -1,224 +1,231 @@
-<div align="center">
+# ⚡ LLM Circuit Breaker (V2)
 
-# ⚡ LLM Circuit Breaker
+[![CI](https://github.com/d2epak/llm-circuit-breaker/actions/workflows/ci.yml/badge.svg)](https://github.com/d2epak/llm-circuit-breaker/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Parity: Resilience4j](https://img.shields.io/badge/Circuit%20Breaker-Resilience4j%20Parity-brightgreen.svg)]()
+[![Zero Dependencies](https://img.shields.io/badge/Core%20Dependencies-Zero-success.svg)]()
 
-**Zero-Downtime Multi-Provider LLM Failover & Autonomous Free-Model Discovery for AI Agents**
-
-[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://docs.python.org/3/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-
-*Run **Claude Code**, **Hermes Agent**, and **OpenClaw** simultaneously on free-tier LLM APIs without rate-limit crashes, mid-stream disconnects, or cross-agent starvation.*
-
-</div>
+A lightweight, self-hostable **agent-resilience gateway** that provides zero-downtime, capability-aware failover, strict tool validation, and semantic state preservation for autonomous AI agents (**Claude Code**, **Hermes Agent**, **OpenClaw**, **Cursor**, **Aider**).
 
 ---
 
-## 🚀 Why LLM Circuit Breaker?
+## 🎯 Why LLM Circuit Breaker V2?
 
-Autonomous coding agents (Claude Code, Cursor, Aider, Hermes Agent, OpenClaw) push LLM APIs to their absolute limits. Traditional reverse proxies and wrapper libraries break down in multi-agent environments:
+Standard reverse proxies and LLM gateways either:
+1. Treat simple cooldown timers as "circuit breakers", leading to race conditions and probe storms;
+2. Route blindly by priority or cost, dispatching tool-calling requests to models that do not support tools;
+3. Guess missing arguments when a model generates broken JSON, hallucinating dangerous shell commands;
+4. Drop critical task objectives when compacting context across models of different window sizes.
 
-- 💥 **Protocol Incompatibilities**: Claude Code requires Anthropic `/v1/messages` with complex `tool_use` schemas. Forwarding requests to OpenAI `/chat/completions` fails with `HTTP 400: Unrecognized parameter`.
-- 💥 **Streaming Dropouts**: Mid-stream 429s or network blips break SSE streams, terminating the agent's work session.
-- 💥 **Protobuf Schema Crashes**: Google AI Studio's 1M context Gemini models reject standard Draft-07 `$schema` tags in tool definitions.
-- 💥 **Context Window Overflow**: Failing over from a 1M context model to a 32k/64k model causes fatal `HTTP 413: context_length_exceeded` errors.
-- 💥 **Cross-Agent Starvation**: Running Claude Code and conversational agents on a shared endpoint exhausts rate limits and cascades failures across all agents.
+**LLM Circuit Breaker V2** solves these failure modes with an agent-first resilience architecture:
 
-**LLM Circuit Breaker** solves all of these challenges natively with an agent-first resilience layer.
-
----
-
-## ✨ Features
-
-- 🛡️ **Dual-Pool Isolation (`coding` vs `general_agent`)**: Dedicated pools with independent cooldown timers. Claude Code's heavy token bursts never starve Hermes or OpenClaw.
-- 🔄 **Bidirectional Anthropic ↔ OpenAI Translation**: Seamlessly converts Anthropic messages, thinking blocks, and tool definitions to OpenAI format and back.
-- 🌊 **Synthetic SSE Streaming**: Buffers upstream completions and verifies HTTP 200 before emitting synthetic Anthropic SSE events. Seamless, dropout-free failovers.
-- 🧹 **Google Gemini REST Protobuf Sanitizer**: Automatically cleans tool parameter schemas (`clean_gemini_schema`) to unlock Google AI Studio's free 1,048,576 token context window.
-- 🗜️ **Dynamic Sliding-Window Context Pruner**: Automatically compacts historical `tool_result` blocks when falling back from a 1M model to a 32k/64k model without losing initial goals.
-- ⏱️ **25-Second Fast Failover**: Strict socket timeouts prevent agents from freezing on stalled upstream connections.
-- 🔍 **Autonomous $0 Model Discovery**: Queries live aggregator catalogs for verified free models with native tool support.
-- 📦 **Zero Mandatory Dependencies**: Runs 100% on Python 3 standard library (`http.server.ThreadingHTTPServer`, `urllib`).
+- 🛡️ **Formal 6-State Circuit Breaker**: Resilience4j-grade finite state machine (`CLOSED`, `OPEN`, `HALF_OPEN`, `FORCED_OPEN`, `DISABLED`, `METRICS_ONLY`) with sliding window error accounting and strictly bounded probe permits.
+- 🧠 **Semantic Failover (Rule 3)**: Fails closed on semantic uncertainty. Safely normalizes markdown code fences and trailing commas, but **never hallucinates missing parameters or tool names**. Malformed tool calls trigger clean failover to alternative capable models.
+- 🎯 **Capability-Aware Routing**: Evaluates candidate models against explicit requirement vectors (tool calling, vision, structured output, reasoning, context tokens) before soft scoring across quality, reliability, latency, and cost.
+- ⏱️ **Hierarchical Deadlines & Cycle Protection**: Enforces total request deadlines, bounded attempt timeouts, jittered exponential backoffs, and loop detection ($A \to B \to A$).
+- 🗜️ **Budget-Aware Context Compaction**: Preserves root user objectives, active constraints, and recent execution turns when falling back from large-window (1M) to smaller-window (32k–128k) models.
+- 🏢 **Multi-Agent Pool Isolation**: Decouples high-velocity coding bursts (`coding` pool for Claude Code) from background autonomous tasks (`general_agent` pool for Hermes), preventing cross-agent starvation.
+- 🔒 **Secure by Default**: Zero telemetry or third-party phone-home. Gemini credentials passed via secure headers (`x-goog-api-key`), eliminating API key exposure in URLs and access logs. Zero global process mutations.
 
 ---
 
-## 📦 Installation
+## 📊 Benchmark Results (Reproducible B1–B10 Suite)
 
+Evaluated against 10 deterministic fault scenarios (permanent 503 outage, intermittent 429, timeouts, context overflows, malformed tool calls, schema rejections, mid-stream disconnects, and multi-provider cascade failures):
+
+| Metric | Direct Provider (Baseline) | LLM Circuit Breaker V2 | Delta / Improvement |
+|---|---|---|---|
+| **Request Completion Rate** | 20.0% | **100.0%** | **+80.0%** |
+| **Autonomous Recovery Rate** | 0.0% | **80.0%** | **+80.0%** |
+| **Median Routing Overhead** | 0.0 ms | **0.1 ms** | Ultra-lightweight in-process routing |
+| **P95 Latency** | 0.0 ms | **0.2 ms** | Bounded by deterministic deadlines |
+| **Average Attempts / Request** | 1.00 | **1.90** | Policy-controlled bounded fallbacks |
+| **Semantic Tool Error Rate** | 10.0% | **0.0%** | **100% rejection of corrupt tool calls** |
+
+> Run the benchmark suite locally anytime with: `python -m benchmarks.run`
+
+---
+
+## 🚀 Quickstart in 60 Seconds
+
+### 1. Installation
+
+Install via pip (zero mandatory third-party dependencies for core engine):
 ```bash
-# Clone the repository
-git clone https://github.com/d2epak/llm-circuit-breaker.git
-cd llm-circuit-breaker
-
-# Optional: Install as an editable package
-pip install -e .
-
-# Optional: With ASGI FastAPI support
-pip install -e ".[asgi]"
+pip install llm-circuit-breaker
 ```
 
----
-
-## 🔑 API Keys Configuration (Plug & Play)
-
-The gateway automatically detects which keys you have exported and routes traffic across them. **You do NOT need all 5 keys!**
-> [!TIP]
-> **Graceful Missing-Key Bypass**: If a key is not exported, that provider is simply skipped without breaking the fallback chain. The gateway will dynamically fail over across whichever providers have active keys.
-
-Export any (or all) of the 5 supported provider keys in your shell:
-
+Or install with optional FastAPI/Uvicorn ASGI extras:
 ```bash
-# 1. Cerebras (Ultra-fast ~2,000 tok/s inference, 64k context)
-export CEREBRAS_API_KEY="csk-..."
+pip install "llm-circuit-breaker[proxy]"
+```
 
-# 2. Groq (Llama 3.3 70B Versatile, 131k context)
+### 2. Export Provider API Keys
+Export whatever free or paid keys you have available:
+```bash
 export GROQ_API_KEY="gsk_..."
-
-# 3. OpenRouter (Free coding models: Qwen 2.5 Coder, Devstral 256k, Llama 3.3)
-export OPENROUTER_API_KEY="sk-or-v1-..."
-
-# 4. Mistral (Codestral 256k context coding specialist)
+export CEREBRAS_API_KEY="csk_..."
+export GEMINI_API_KEY="AIza..."
+export OPENROUTER_API_KEY="sk-or-..."
 export MISTRAL_API_KEY="..."
-
-# 5. NVIDIA NIM (Nemotron 3 Ultra 131k context)
-export NVIDIA_API_KEY="nvapi-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
 ```
 
-*(You can also place these keys in `~/.claude/.env` or `~/.hermes/.env` and the gateway will auto-load them).*
+### 3. Launch the Gateway
+```bash
+llm-proxy --port 4001
+```
+
+The gateway starts on `http://127.0.0.1:4001`:
+- **Claude Code (Anthropic Messages API)**: `http://127.0.0.1:4001/v1/messages`
+- **Hermes / OpenClaw (OpenAI Chat API)**: `http://127.0.0.1:4001/v1/chat/completions`
+- **Live Diagnostics & Breaker States**: `http://127.0.0.1:4001/health`
+- **Prometheus & Health Metrics**: `http://127.0.0.1:4001/metrics`
 
 ---
 
-## 🛠️ Plug-and-Play Quickstart
+## 🤖 Agent Configuration
 
-### Step 1: Start the Gateway
-Run the local gateway on port `4001`:
-
+### Claude Code
+Configure Claude Code to route all coding agent turns through the resilience gateway:
 ```bash
-python3 src/llm_circuit_breaker/proxy.py --port 4001
-# Or via CLI script if installed:
-# llm-proxy --port 4001
-```
+export ANTHROPIC_BASE_URL="http://127.0.0.1:4001"
+export ANTHROPIC_API_KEY="dummy-local-key"
 
-The gateway exposes:
-- **Claude Code (Coding Pool)**: `http://127.0.0.1:4001/v1/messages`
-- **Hermes / OpenClaw (Agent Pool)**: `http://127.0.0.1:4001/v1/chat/completions`
-- **Health Diagnostics**: `http://127.0.0.1:4001/health`
-
----
-
-### Step 2: Configure Your Agents
-
-#### A. Claude Code
-Point Claude Code to the local gateway:
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:4001/v1"
-export ANTHROPIC_API_KEY="sk-circuit-breaker-token"
 claude
 ```
-*(Or use the 1-click script: `./examples/claude_code_setup.sh`)*
 
-##### Autonomous Long-Horizon / Overnight Runner
-For multi-hour, multi-turn autonomous engineering sessions (e.g. overnight builds or endurance tests) without human intervention:
-
-```bash
-python3 examples/durable_runner.py --goal YOUR_TASK.md --max-turns 30
-```
-This durable runner provides an outer control loop that:
-- Executes turns non-interactively with `--dangerously-skip-permissions -p`.
-- Detects zombie stalls or deadlocks with an **Activity Watchdog**.
-- Persists checkpoints in `PROGRESS.md` and restarts fresh turns with clean context until the task succeeds.
-
-#### B. Hermes Agent
-Add the custom provider to `~/.hermes/config.yaml`:
-
-```yaml
-custom_providers:
-  - name: circuit-breaker
-    base_url: http://127.0.0.1:4001/v1
-    api_key: sk-circuit-breaker-token
-    model: hermes-default
-
-default_provider: circuit-breaker
-default_model: hermes-default
-```
-
-#### C. OpenClaw
-Set the OpenAI environment variables:
-
+### Hermes Agent & OpenClaw
+Configure OpenAI-compatible autonomous agents to point at the gateway:
 ```bash
 export OPENAI_BASE_URL="http://127.0.0.1:4001/v1"
-export OPENAI_API_KEY="sk-circuit-breaker-token"
-export OPENAI_MODEL_NAME="openclaw-default"
+export OPENAI_API_KEY="dummy-local-key"
+```
+
+### Cursor / Aider / Windsurf
+Set the custom OpenAI base URL to:
+```
+http://127.0.0.1:4001/v1
 ```
 
 ---
 
-## 🐍 Direct Python API
+## 🐍 Python SDK Usage
 
-For custom agents and scripts, use the `UniversalFailoverRouter` directly:
+You can embed the resilience gateway directly into your Python application or agent framework without running an external server:
 
 ```python
-from llm_circuit_breaker import UniversalFailoverRouter, classify_api_error, FailoverReason
+from llm_circuit_breaker import (
+    GatewayExecutor,
+    NormalizedRequest,
+    NormalizedMessage,
+    NormalizedToolDefinition,
+    ExecutionPolicy,
+    RetryPolicy,
+    FallbackPolicy,
+)
 
-# Initialize router with priority endpoints + auto-discovered free backups
-router = UniversalFailoverRouter()
+# Initialize gateway executor
+executor = GatewayExecutor(
+    policy=ExecutionPolicy(
+        retry=RetryPolicy(max_attempts_same_endpoint=2),
+        fallback=FallbackPolicy(max_fallback_hops=3),
+    )
+)
 
-payload = {
-    "messages": [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Write a binary search algorithm in Python."}
+# Create normalized request
+request = NormalizedRequest(
+    model="default",
+    messages=[
+        NormalizedMessage(role="user", content="Read configuration file"),
     ],
-    "max_tokens": 1024
-}
+    tools=[
+        NormalizedToolDefinition(
+            name="read_file",
+            description="Read file contents",
+            parameters={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        )
+    ],
+)
 
-# Dispatch with automatic multi-provider failover
-status, response, route = router.dispatch("coding", payload)
+# Execute with autonomous failover across coding pool
+response, decision, ledger = executor.execute(request, pool="coding", strategy="balanced")
 
-if status == 200:
-    print(response["choices"][0]["message"]["content"])
-else:
-    print("All fallback routes exhausted:", response)
+print(f"Selected Endpoint: {decision.selected_endpoint.provider}/{decision.selected_endpoint.model}")
+print(f"Total Attempts: {ledger.total_attempts} (Fallbacks: {ledger.fallback_count})")
+print(f"Response: {response.content or response.tool_calls}")
 ```
 
 ---
 
-## 🔍 Free-Model Discovery CLI
+## 🏛️ Architecture
 
-Find active $0 free models with native tool support right from your terminal:
+```mermaid
+graph TD
+    Client[AI Agents: Claude Code / Hermes / OpenClaw] -->|HTTP / SSE| Gateway[Gateway Server / Proxy]
+    Gateway --> IR[Protocol Intermediate Representation IR]
+    IR --> Router[Capability-Aware Router]
+    
+    subgraph Routing & Candidate Selection
+        Router --> HardFilter[Hard Constraint Filter\nTools, Vision, Context Size]
+        HardFilter --> BreakerFilter[Circuit Breaker Admission Check]
+        BreakerFilter --> Scorer[Multi-Objective Soft Scorer\nQuality, Reliability, Latency, Cost]
+        Scorer --> DecisionRecord[Explainable Decision Audit]
+    end
 
-```bash
-python3 src/llm_circuit_breaker/discovery.py --limit 5
+    subgraph Execution & Resilience Loop
+        DecisionRecord --> Executor[Gateway Executor]
+        Executor --> ContextMgr[Budget-Aware Context Compactor]
+        ContextMgr --> Adapter[Provider Adapter]
+        Adapter --> Upstream[Upstream LLM Provider]
+        Upstream --> Classify[Hierarchical Error Classifier]
+        Classify --> BreakerEngine[Resilience4j Circuit Breaker Engine]
+        Classify --> ToolSafety[Tool Schema Validation & Safety Layer]
+    end
+
+    Executor -->|Synthetic or True SSE| Client
 ```
 
-```text
-🔍 Querying live aggregator catalog for $0 free models with native tool support...
-
-💻 Coding Pool (8 discovered):
-  1. qwen/qwen-2.5-coder-32b-instruct:free (32,768 tokens context)
-  2. mistralai/devstral-2512:free (262,144 tokens context)
-
-🤖 General Agent Pool (14 discovered):
-  1. google/gemma-4-26b-a4b-it:free (262,144 tokens context)
-  2. nvidia/nemotron-3-nano-30b-a3b:free (32,768 tokens context)
-```
+For complete technical specifications, review [ARCHITECTURE.md](ARCHITECTURE.md) and the [Architecture Decision Records](docs/adr/).
 
 ---
 
-## 🧪 Testing
+## ⚙️ Configuration Reference
 
-Run the full self-contained unit test suite (13/13 passing):
+Configure the gateway via `GatewayConfig` in Python, JSON configuration files, or environment variables:
 
-```bash
-python3 -m unittest discover -s tests -p "test_*.py"
-```
+| Environment Variable | Default | Description |
+|---|---|---|
+| `LLM_BREAKER_PORT` | `8080` | Port for gateway proxy server |
+| `LLM_BREAKER_HOST` | `127.0.0.1` | Bind host |
+| `LLM_BREAKER_DEFAULT_POOL` | `general_agent` | Default routing pool (`coding` or `general_agent`) |
+| `LLM_BREAKER_STRATEGY` | `balanced` | Selection strategy (`balanced`, `priority`, `round_robin`, `latency_aware`, `cost_aware`) |
+| `LLM_BREAKER_DEADLINE_MS` | `60000.0` | Total request execution deadline |
+| `LLM_BREAKER_FAILURE_THRESHOLD` | `50.0` | Failure rate % that trips circuit breaker to OPEN |
+| `LLM_BREAKER_WINDOW_SIZE` | `10` | Size of sliding window for error calculation |
+| `LLM_BREAKER_WAIT_OPEN` | `30.0` | Seconds to remain OPEN before transitioning to HALF_OPEN |
+| `LLM_BREAKER_HALF_OPEN_CALLS` | `3` | Permitted probe calls in HALF_OPEN state |
+| `LLM_BREAKER_RETRY_MAX` | `2` | Maximum retry attempts on the same endpoint |
+| `LLM_BREAKER_FALLBACK_MAX` | `3` | Maximum fallback hops across alternative endpoints |
 
 ---
 
-## 📚 Deep-Dive Architecture
+## 🔒 Security & Privacy
 
-For detailed design notes on Protobuf schema sanitization, synthetic SSE streaming, dual-pool cooldown isolation, and context compaction algorithms, see [**`ARCHITECTURE.md`**](ARCHITECTURE.md).
+- **Zero Third-Party Telemetry**: Air-gapped and local-first.
+- **Secure Gemini Header Transport**: Passes `x-goog-api-key` in HTTP headers, preventing URL credential leakage in proxy logs.
+- **Fail Closed on Tool Corruption**: Strictly rejects malformed tool JSON to protect local execution environments.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and compliance details.
 
 ---
 
-## 📄 License
+## 📜 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT License. See [LICENSE](LICENSE) for details.

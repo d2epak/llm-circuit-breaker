@@ -1,156 +1,116 @@
-# Architecture & Engineering Notes: LLM Circuit Breaker
+# LLM Circuit Breaker V2 — Architecture Specification
 
-**Version:** 0.2.0  
-**Author:** Deepak & Community Contributors  
-**License:** MIT  
+This document provides a comprehensive technical reference for the architecture, subsystems, and invariants of the LLM Circuit Breaker V2 gateway.
 
 ---
 
-## 1. The Core Challenge: Free LLMs for Autonomous Agents
+## 1. High-Level Architecture Overview
 
-Building autonomous AI coding agents (such as **Claude Code**, **Hermes Agent**, and **OpenClaw**) requires sustained, high-context reasoning across hundreds of conversational turns. While commercial frontier APIs (Anthropic, OpenAI) cost significant money over multi-hour sessions, dozens of top-tier open-weights models and aggregators (Google AI Studio, Groq, Cerebras, Mistral, NVIDIA NIM, OpenRouter) offer **free tier quotas**.
+```mermaid
+graph TD
+    Client[AI Agents: Claude Code / Hermes / OpenClaw] -->|HTTP / SSE| Gateway[Gateway Server / Proxy]
+    Gateway --> IR[Protocol Intermediate Representation IR]
+    IR --> Router[Capability-Aware Router]
+    
+    subgraph Routing & Decision Pipeline
+        Router --> HardFilter[Hard Constraint Filter\nTools, Vision, Context Size]
+        HardFilter --> BreakerFilter[Circuit Breaker Admission Check]
+        BreakerFilter --> Scorer[Multi-Objective Soft Scorer\nQuality, Reliability, Latency, Cost]
+        Scorer --> DecisionRecord[Explainable Decision Audit]
+    end
 
-However, attempting to run autonomous agents directly on free-tier APIs inevitably fails due to four brutal failure modes:
+    subgraph Execution & Resilience Loop
+        DecisionRecord --> Executor[Gateway Executor]
+        Executor --> ContextMgr[Budget-Aware Context Compactor]
+        ContextMgr --> Adapter[Provider Adapter]
+        Adapter --> Upstream[Upstream LLM Provider]
+        Upstream --> Classify[Hierarchical Error Classifier]
+        Classify --> BreakerEngine[Resilience4j Circuit Breaker Engine]
+        Classify --> ToolSafety[Tool Schema Validation & Safety Layer]
+    end
 
-1. **Protocol Incompatibility**: Claude Code exclusively expects the Anthropic `/v1/messages` protocol with nested `tool_use` blocks and `input_schema` schemas. Open-weights models and aggregators speak OpenAI `/v1/chat/completions` with `tool_calls`. Dumb reverse proxies forward raw JSON and fail with `HTTP 400: Unrecognized parameter`.
-2. **Streaming Dropouts**: Claude Code streams responses via Server-Sent Events (SSE). If a provider rate-limits (HTTP 429) or crashes midway through a streamed response, the client experiences a broken pipe and terminates the agent's work session.
-3. **Protobuf Schema Rejection**: Google AI Studio provides a free 1,048,576 token (1M) context window (via Gemini 2.5 Flash), which is ideal for long-horizon coding. However, Google's API parser strictly rejects standard JSON Schema Draft-07 keys (`$schema`, `additionalProperties`, `default`, and lowercase types), returning `HTTP 400: unknown name "$schema"`.
-4. **Context Overflow Cascades**: Switching from a 1M token model to a 32k/64k backup model causes an immediate `HTTP 413: context_length_exceeded` fatal crash.
-5. **Cross-Agent Starvation**: Running Claude Code, Hermes, and OpenClaw on a single shared endpoint causes Claude Code's heavy coding requests to consume rate limits, starving Hermes and OpenClaw of conversational turns.
-
-**LLM Circuit Breaker** solves all of these challenges natively in a zero-dependency, self-healing gateway.
-
----
-
-## 2. Architecture Overview
-
-```
-                        +---------------------------------------+
-                        |           AI AGENT CLIENTS            |
-                        | Claude Code | Hermes Agent | OpenClaw |
-                        +-------------------+-------------------+
-                                            |
-                         HTTP Requests (Anthropic / OpenAI)
-                                            v
-+-----------------------------------------------------------------------------------+
-|                           LLM CIRCUIT BREAKER GATEWAY                             |
-|                                                                                   |
-|  +---------------------------+             +-----------------------------------+  |
-|  |   Anthropic /v1/messages  |             |     OpenAI /v1/chat/completions   |  |
-|  |     (for Claude Code)     |             |     (for Hermes & OpenClaw)       |  |
-|  +-------------+-------------+             +-----------------+-----------------+  |
-|                |                                             |                    |
-|                v                                             v                    |
-|  +---------------------------+             +-----------------------------------+  |
-|  |   Protocol Translator     |             |       Dynamic Context Pruner      |  |
-|  | - Anthropic <-> OpenAI    |             | - Compacts old tool_results       |  |
-|  | - Synthetic SSE Streamer  |             | - Preserves Goal & System Turn    |  |
-|  | - Gemini Protobuf Cleaner |             +-----------------+-----------------+  |
-|  +-------------+-------------+                               |                    |
-|                +----------------------+----------------------+                    |
-|                                       v                                           |
-|                     +-----------------------------------+                         |
-|                     |     Universal Failover Router     |                         |
-|                     +-----------------+-----------------+                         |
-|                                       |                                           |
-|          +----------------------------+----------------------------+              |
-|          v                                                         v              |
-|  +--------------------------------+             +-------------------------------+ |
-|  |     POOL 1: 'CODING'           |             |     POOL 2: 'GENERAL_AGENT'   | |
-|  | - Cerebras Llama 3.3 70B       |             | - Cerebras Llama 3.3 70B      | |
-|  | - Groq Llama 3.3 70B           |             | - Groq Llama 3.3 70B          | |
-|  | - OpenRouter Qwen 2.5 Coder    |             | - Cerebras Llama 3.1 8B       | |
-|  | - OpenRouter Devstral 256k     |             | - OpenRouter Llama 3.3 70B    | |
-|  | - Mistral Codestral 256k       |             | - Mistral Small               | |
-|  | - NVIDIA Nemotron 3 Ultra      |             | - NVIDIA Nemotron 3 Ultra     | |
-|  +--------------------------------+             +-------------------------------+ |
-|          |                                                         |              |
-|          +----------------------------+----------------------------+              |
-|                                       v                                           |
-|                     +-----------------------------------+                         |
-|                     |     Error Classifier & Cooldown   |                         |
-|                     | - Independent Cooldown Timers     |                         |
-|                     | - Instant 404 Auto-Deprecation    |                         |
-|                     | - 25s Socket Timeout Guarantee    |                         |
-|                     +-----------------------------------+                         |
-+-----------------------------------------------------------------------------------+
+    Executor -->|Synthetic or True SSE| Client
 ```
 
 ---
 
-## 3. Deep-Dive: Key Innovations
+## 2. Finite State Machine (FSM)
 
-### A. Dual-Pool Multi-Agent Isolation
-Instead of maintaining a single linear fallback chain, the engine separates routing into two independent pools:
-* **`coding` Pool**: Tuned for AST manipulation, large multi-file diffs, and strict JSON tool schema validation.
-* **`general_agent` Pool**: Tuned for ultra-low latency inference, multi-turn dialogue, web search synthesis, and general planning.
+The circuit breaker operates as an atomic finite state machine with 6 discrete states:
 
-**Independent Cooldowns**:
-If Claude Code exhausts Groq's tokens per minute with a massive prompt, Groq is placed on cooldown **only for the `coding` pool**. Hermes and OpenClaw can continue using Groq for conversational steps without interruption.
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: Failure rate >= threshold\nOR Slow call rate >= threshold
+    OPEN --> HALF_OPEN: Wait duration expires
+    HALF_OPEN --> CLOSED: Configured probe permits succeed
+    HALF_OPEN --> OPEN: Any probe call fails
+    CLOSED --> FORCED_OPEN: Administrative lock
+    OPEN --> FORCED_OPEN: Administrative lock
+    FORCED_OPEN --> CLOSED: Administrative reset
+    CLOSED --> DISABLED: Protection disabled
+```
 
-### B. Synthetic SSE Streaming
-Claude Code always requests streaming (`stream: true`). Rather than piping raw network chunks (which breaks failover if an upstream provider dies mid-chunk), the Circuit Breaker:
-1. Buffers the upstream completion completely.
-2. If the provider errors (429, 503, 500, timeout), it immediately fails over to the next provider silently.
-3. Once a healthy HTTP 200 is secured, it synthesizes standard Anthropic SSE events:
-   - `message_start`
-   - `content_block_start` / `content_block_delta` (for text, thinking, and tool_use)
-   - `content_block_stop`
-   - `message_delta`
-   - `message_stop`
-
-Claude Code receives a clean, unbroken stream every single turn.
-
-### C. Google Gemini Protobuf Sanitizer (`clean_gemini_schema`)
-Google AI Studio's Gemini REST API (`/v1beta/models/...:generateContent`) uses Protobuf definitions that reject Draft-07 schema keywords.
-
-`clean_gemini_schema()` recursively:
-- Strips `$schema`, `additionalProperties`, `default`, `title`, `$id`, `$comment`, `definitions`.
-- Normalizes type declarations to Gemini uppercase strings (`OBJECT`, `STRING`, `INTEGER`, `NUMBER`, `BOOLEAN`, `ARRAY`).
-- Resolves `["string", "null"]` type unions.
-- Tracks `tool_id_to_name` so subsequent tool execution turns accurately report `functionResponse.name` back to Gemini.
-
-### D. Dynamic Sliding-Window Context Compaction
-When failing over from a 1M token model to a 32k/64k model:
-- Compaction isolates historical `tool_result` payloads in older turns (file contents and terminal outputs) and truncates them to a 500-character representative excerpt.
-- The system prompt, the root user objective, and the latest 6 execution turns are strictly preserved.
-- Prevents fatal `HTTP 413` errors on open-weights fallback models.
-
-### E. 25-Second Fast Failover & Socket Timeouts
-Default HTTP client timeouts (60s–120s) cause agents to freeze when an upstream provider hangs on an open TCP socket. The Circuit Breaker enforces:
-- Global socket read timeout of **25 seconds** (`socket.setdefaulttimeout(25)`).
-- **Instant 404 Deprecation**: Any endpoint returning HTTP 404 is permanently blacklisted for the session, preventing recurring round-robin delays.
-
-### F. Tool Argument JSON Healing
-Open-weights models frequently wrap JSON arguments in markdown code blocks (` ```json ... ``` `) or append trailing commas before closing brackets. `repair_json_string()` sanitizes these anomalies before passing tool calls to Claude Code.
-
-### G. Dynamic API Key Detection & Graceful Bypass
-Users are not required to provide API keys for all 5 providers. When `get_candidate_routes(pool)` evaluates routes:
-- If a route defines an `env_key`, the manager inspects `os.environ` and local `.env` files.
-- If that key is unset or empty, the provider is **silently bypassed**.
-- It does **not** fail the request or trigger an error; the candidate pool dynamically filters down to whichever providers have active credentials.
-- If you only export `GROQ_API_KEY` and `OPENROUTER_API_KEY`, the engine operates as a two-way failover bridge between Groq and OpenRouter.
+### Invariants:
+1. **Permit-Bounded Probes**: When in `HALF_OPEN`, concurrent calls are bounded to `half_open_max_calls` permits. Additional concurrent calls immediately raise `ProbeAdmissionDeniedError`.
+2. **Zero Upstream Calls When OPEN**: Calls targeting an `OPEN` circuit breaker are immediately rejected with `BreakerOpenError` without placing any network load on the downstream service.
+3. **Non-Poisoning Faults**: Errors classified as `CLIENT_FAULT` or `REQUEST_INCOMPATIBILITY` (such as 413 context overflows or schema rejections) do not increment failure metrics and cannot trip the breaker.
 
 ---
 
-## 4. Zero-Dependency Runtime Philosophy
+## 3. Request Lifecycle Sequence
 
-The core proxy and library run **100% on standard Python 3.9+ libraries**:
-- `http.server.ThreadingHTTPServer`
-- `urllib.request`
-- `socket`
-- `json`
-- `sqlite3`
-- `threading`
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Agent as Autonomous Agent
+    participant Gateway as Gateway Executor
+    participant Router as Capability Router
+    participant Breaker as Circuit Breaker
+    participant Context as Context Compactor
+    participant Upstream as Provider Upstream
+    participant Safety as Tool Safety Validator
 
-No external virtual environments, wheels, or compiled extensions are required. Optional ASGI integration (`fastapi`, `uvicorn`) is available via `pip install 'llm-circuit-breaker[asgi]'`.
+    Agent->>Gateway: POST /v1/messages or /v1/chat/completions
+    Gateway->>Gateway: Translate Native Request to Protocol IR
+    Gateway->>Router: Select Candidate (Requirements, Active Pool)
+    Router->>Breaker: Check Breaker State
+    Breaker-->>Router: Admitted (CLOSED or Probe Permit)
+    Router-->>Gateway: Candidate Selected (e.g. Cerebras)
+    Gateway->>Context: Verify Token Budget against Model Context
+    Context-->>Gateway: Adapted / Compacted Request
+    Gateway->>Upstream: Execute HTTP Request
+    alt Upstream Fails (503 / 429 / Timeout)
+        Upstream-->>Gateway: Failure Response
+        Gateway->>Breaker: Record Failure (Update Sliding Window)
+        Gateway->>Router: Trigger Fallback (Exclude Failed Endpoint)
+        Router-->>Gateway: Next Candidate Selected (e.g. Groq)
+        Gateway->>Upstream: Execute Fallback Request
+    end
+    Upstream-->>Gateway: 200 OK Response
+    Gateway->>Safety: Validate Tool Call Schema (Zero Hallucination)
+    Safety-->>Gateway: Validated Tool Arguments
+    Gateway->>Breaker: Record Success
+    Gateway-->>Agent: SSE Stream or JSON Response
+```
 
 ---
 
-## 5. Live Production Verification
+## 4. Subsystem Details
 
-The architecture has been verified under real-world multi-hour autonomous runs:
-* **Task**: Distributed Raft consensus implementation and 15-minute network partition chaos test (`chaos_tester.py`).
-* **Harness**: Claude Code v2.1 CLI.
-* **Duration**: 45+ minutes continuous unattended operation.
-* **Results**: Flawless tool schema execution, automated code modifications, subprocess execution, and sub-3-second response latency on Gemini 2.5 Flash.
+### A. Protocol Intermediate Representation (IR)
+The gateway converts all incoming payloads into canonical `NormalizedRequest` / `NormalizedResponse` dataclasses. This eliminates $M \times N$ translator sprawl, converting provider integrations into an $O(N)$ architecture. Thinking/reasoning blocks (such as Claude 3.7 and Gemini thinking) are preserved end-to-end.
+
+### B. Budget-Aware Context Compaction
+When falling back from large-window models (1M tokens) to smaller-window models (32k–128k tokens), `ContextManager` applies hierarchical compaction:
+1. System instructions, root user objective, and active constraints are strictly preserved.
+2. The latest $K$ execution turns are preserved intact.
+3. Historical tool outputs in intermediate turns are truncated to head and tail excerpts.
+4. Oldest intermediate turns are evicted only if the budget remains exceeded.
+
+### C. Tool Safety Layer (Rule 3 Compliance)
+- Deterministic syntactic repairs (stripping markdown backticks, removing trailing commas) are permitted.
+- Semantic guessing is strictly prohibited. If a model generates missing required parameters or hallucinates unknown tool names, the tool call is rejected as `UNSAFE_TO_REPAIR` and clean failover to another model is triggered.
+
+### D. Multi-Agent Pool Isolation
+Independent routing pools (`coding` vs `general_agent`) ensure that high-velocity coding bursts from agents like Claude Code or Aider cannot starve or trip circuit breakers for conversational agents like Hermes or OpenClaw.
