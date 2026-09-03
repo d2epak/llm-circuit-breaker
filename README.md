@@ -47,6 +47,34 @@ Evaluated against 10 deterministic fault scenarios (permanent 503 outage, interm
 
 ---
 
+## 🥊 Comparison with Competitors & Alternatives
+
+How does **LLM Circuit Breaker V2** compare to existing gateways, proxies, and routing libraries?
+
+| Capability / Dimension | **LLM Circuit Breaker V2** | **LiteLLM Proxy** | **Portkey Gateway** | **OpenRouter** | **LangChain Fallbacks** |
+|---|---|---|---|---|---|
+| **Circuit Breaker Engine** | **Resilience4j Parity** (6-state FSM, count & time sliding windows, bounded probe permits) | Basic cooldown timer (`time + 60s`), no permit bounds | Proprietary cloud breaker (enterprise tier) | None (static server-side failover) | Client-side try/catch retry list |
+| **Semantic Failover (Rule 3)** | **Yes (Fail Closed)**: Strict schema validation, syntactic normalization, zero argument hallucination | **No**: Blind pass-through; unparseable tool calls crash agent | **No**: Pass-through; no semantic validation | **No**: Hosted routing only | **No**: Manual application code required |
+| **Capability-Aware Model Selection** | **Yes**: Hard constraint vectors (tools, vision, reasoning, context) + multi-objective soft scoring | **Partial**: Basic tag filtering; can dispatch tool calls to non-tool models | **Partial**: Rule-based routing configs | **Partial**: User-defined routing lists | **None**: Fixed hardcoded fallback chain |
+| **Hierarchical Context Compaction** | **Yes**: Preserves root user goal, active constraints, and recent turns across window sizes (1M $\to$ 32k) | **No**: Naive truncation; prone to 413 context overflows on fallback | **No**: Truncation requires custom plugins | **No**: Upstream error on overflow | **Manual**: Developer must write custom summarizer |
+| **Multi-Agent Pool Isolation** | **Yes**: Isolated failure domains (`coding` pool vs `general_agent` pool) | **No**: Shared rate limits; coding burst trips breaker for all agents | **Partial**: Requires enterprise workspaces | **No**: Global account rate limits | **No**: Process-level only |
+| **Deployment Footprint** | **Zero Mandatory Dependencies**: Runs on standard Python library (`http.server`, `urllib`) | Requires external PostgreSQL & Redis for production state | SaaS cloud-hosted or heavy enterprise container | Commercial hosted service (cloud-only) | Python library SDK (in-process only) |
+| **Data Privacy & Telemetry** | **100% Air-Gapped**: Zero third-party telemetry, secure header auth (`x-goog-api-key`) | Telemetry enabled by default; complex audit setup | Cloud control plane collects request metadata | All requests route through third-party servers | Dependent on user code |
+| **Drop-in Agent Protocols** | **Native Dual-Protocol**: Anthropic `/v1/messages` (Claude Code) + OpenAI `/v1/chat/completions` (Hermes) | OpenAI format focus; Anthropic translation partial | OpenAI format focus | Hosted API with custom headers | Requires LangChain abstractions |
+
+### Detailed Breakdown: Why V2 Wins for AI Agents
+
+1. **Versus LiteLLM Proxy**:
+   LiteLLM is a general-purpose proxy designed primarily for cost-tracking and unifying API formats for basic web apps. However, it treats simple timestamps as "circuit breakers", which allows race conditions and probe storms during upstream recovery. More critically, LiteLLM does not inspect or validate tool call schemas: when an upstream model emits hallucinated or broken tool arguments, LiteLLM passes the corrupt JSON directly to the agent, causing agent crashes or dangerous arbitrary command execution. LLM Circuit Breaker V2 provides Resilience4j-grade state machines and strict semantic safety validation.
+
+2. **Versus Portkey & OpenRouter**:
+   Portkey is an enterprise cloud platform, and OpenRouter is a commercial routing broker. Both require routing your sensitive agent traffic through third-party infrastructure. LLM Circuit Breaker V2 is **100% self-hostable, local-first, and air-gapped capable**, running with zero external database dependencies (no Postgres, no Redis).
+
+3. **Versus LangChain / Framework Fallbacks**:
+   Client-side SDK fallbacks require hardcoding fallback lists into your application source code and cannot protect external agent runtimes like **Claude Code**, **Hermes Agent**, **OpenClaw**, **Cursor**, or **Aider**. LLM Circuit Breaker operates as an autonomous, protocol-level gateway that intercepts and heals agent traffic transparently.
+
+---
+
 ## 🚀 Quickstart in 60 Seconds
 
 ### 1. Installation
