@@ -85,3 +85,22 @@ This document tracks implementation progress across milestones, capturing object
 - **Results:** 100% pass on all 37 tests. Proved that hard constraints are never overridden by soft scores, cycle detection prevents infinite loops, and deadline calculations dynamically bound attempt timeouts.
 - **Known Limitations:** Agent semantics (tool schema validation, agent state snapshots, context compaction) are the next requirements.
 - **Next Phase:** Phase 7 (Tool Validation & Safety Layer) & Phase 8 (Agent Semantic State & Context Adaptation).
+
+---
+
+## Phase 7 & 8: Tool Validation & Safety Layer, Agent Semantic State & Context Adaptation
+- **Date:** 2026-09-03
+- **Commit:** `v2-05-agent-semantics`
+- **Objective:** Implement strict tool schema validation with safe syntactic normalization and zero argument hallucination, provider-neutral `AgentState` and `StateSnapshot` models, and budget-aware context manager preserving planted task goals and constraints.
+- **Files Created/Modified:**
+  - `src/llm_circuit_breaker/agent/tool_validation.py` (`ToolCallValidator`, `ToolCallResult`, and `ToolValidationReport`)
+  - `src/llm_circuit_breaker/agent/state.py` (`AgentState` with versioning and immutable `StateSnapshot`)
+  - `src/llm_circuit_breaker/agent/context.py` (`ContextBudget` and `ContextManager` with hierarchical compaction)
+  - `src/llm_circuit_breaker/agent/__init__.py`
+  - `tests/unit/test_tool_validation.py` (Tests for valid tools, markdown fence normalization, missing required keys, unknown tools, and strict unparseable text rejection)
+  - `tests/unit/test_agent_semantics.py` (Tests for snapshot serialization roundtrip and context compaction preserving planted critical goals and constraints)
+- **Tests Run:**
+  - `uv run pytest -v` (44 passed in 0.96s)
+- **Results:** 100% pass on all 44 tests. Verified Rule 3 compliance: missing tool arguments are rejected without guessing, markdown fences are safely stripped, and planted root goals remain intact through budget-driven compaction.
+- **Known Limitations:** Streaming modes, provider adapters, and deterministic fault-injection harness are needed next.
+- **Next Phase:** Phase 9 (Streaming Architecture) & Phase 10 (Provider Adapters & Health Telemetry).
