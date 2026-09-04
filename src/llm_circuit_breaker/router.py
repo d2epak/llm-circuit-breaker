@@ -155,6 +155,23 @@ class UniversalFailoverRouter:
         self.pool_manager.mark_deprecated(target_pool, model)
         logger.warning("Blacklisted deprecated model: %s", model)
 
+    def record_success(self, provider: str, model: str) -> None:
+        """Record a successful execution, clearing cooldowns for this provider."""
+        p = provider.lower()
+        if p in self.provider_cooldowns:
+            del self.provider_cooldowns[p]
+        if hasattr(self, "auth_failed_providers") and p in self.auth_failed_providers:
+            self.auth_failed_providers.remove(p)
+        logger.info("Recorded success for %s/%s; cleared cooldowns.", provider, model)
+
+    def mark_auth_failed(self, provider: str) -> None:
+        """Mark provider as permanently failed authentication for this session."""
+        p = provider.lower()
+        if not hasattr(self, "auth_failed_providers") or self.auth_failed_providers is None:
+            self.auth_failed_providers = set()
+        self.auth_failed_providers.add(p)
+        logger.warning("Provider %s marked authentication failed", provider)
+
     def get_next_available_route(self, reason: Optional[FailoverReason] = None, pool: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Select next healthy route in fallback chain or pool."""
         if self.fallback_chain:
