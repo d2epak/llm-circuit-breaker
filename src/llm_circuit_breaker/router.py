@@ -27,6 +27,19 @@ logger = logging.getLogger("llm_circuit_breaker.router")
 DEFAULT_TIMEOUT = int(os.environ.get("GATEWAY_TIMEOUT", "25"))
 
 
+def resolve_secret(key_name: str) -> Optional[str]:
+    """Resolve an API key or secret by key name across env and pool configuration."""
+    val = os.environ.get(key_name)
+    if val and val.strip():
+        return val.strip()
+    keys = POOL_MANAGER.keys
+    if key_name in keys and keys[key_name].strip():
+        return keys[key_name].strip()
+    from llm_circuit_breaker.pools import load_all_env_keys
+    fresh = load_all_env_keys([key_name])
+    return fresh.get(key_name)
+
+
 def execute_upstream_request(
     route: RouteDefinition,
     openai_payload: Dict[str, Any],
@@ -91,18 +104,39 @@ class UniversalFailoverRouter:
         auto_discover_free: bool = True,
         max_discovered_free: int = 5,
         default_pool: str = "general_agent",
+        allowed_providers: Optional[Set[str]] = None,
     ):
         self.default_pool = default_pool
         self.pool_manager = POOL_MANAGER
-        self.fallback_chain: List[Dict[str, Any]] = list(configured_fallbacks or [])
+
+        # Resolve allowed providers from parameter or env
+        env_allowed = os.getenv("LLM_ALLOWED_PROVIDERS")
+        if allowed_providers is not None:
+            self.allowed_providers: Optional[Set[str]] = {p.lower().strip() for p in allowed_providers}
+        elif env_allowed:
+            self.allowed_providers = {p.lower().strip() for p in env_allowed.split(",") if p.strip()}
+        else:
+            self.allowed_providers = None
+
+        if self.allowed_providers is not None:
+            self.pool_manager.allowed_providers = self.allowed_providers
+
+        self.fallback_chain: List[Dict[str, Any]] = []
+        for item in (configured_fallbacks or []):
+            p = (item.get("provider") or "").lower().strip()
+            if self.allowed_providers is not None and p not in self.allowed_providers:
+                continue
+            self.fallback_chain.append(item)
+
         self.provider_cooldowns: Dict[str, float] = {}
         self.deprecated_models: Set[str] = set()
-        self.fallback_index: int = 0
+        self.auth_failed_providers: Set[str] = set()
+        self.fallback_index: int = -1
 
         # Also register configured fallbacks into pool manager if provided
-        if configured_fallbacks:
+        if self.fallback_chain:
             converted_routes: List[RouteDefinition] = []
-            for item in configured_fallbacks:
+            for item in self.fallback_chain:
                 route = RouteDefinition(
                     id=item.get("id") or f"{item.get('provider')}-{item.get('model')}",
                     provider=item.get("provider", "custom"),
@@ -129,7 +163,8 @@ class UniversalFailoverRouter:
     def active_provider(self) -> Dict[str, Any]:
         """Return currently active provider definition."""
         if self.fallback_chain:
-            return self.fallback_chain[self.fallback_index % len(self.fallback_chain)]
+            idx = max(0, self.fallback_index) % len(self.fallback_chain)
+            return self.fallback_chain[idx]
         route = self.pool_manager.select_route(self.default_pool)
         if not route:
             return {}
@@ -162,6 +197,7 @@ class UniversalFailoverRouter:
             del self.provider_cooldowns[p]
         if hasattr(self, "auth_failed_providers") and p in self.auth_failed_providers:
             self.auth_failed_providers.remove(p)
+        self.pool_manager.clear_cooldown(p)
         logger.info("Recorded success for %s/%s; cleared cooldowns.", provider, model)
 
     def mark_auth_failed(self, provider: str) -> None:
@@ -185,6 +221,10 @@ class UniversalFailoverRouter:
                 p = candidate.get("provider", "").lower()
                 m = candidate.get("model", "")
 
+                if self.allowed_providers is not None and p not in self.allowed_providers:
+                    continue
+                if hasattr(self, "auth_failed_providers") and p in self.auth_failed_providers:
+                    continue
                 if m in self.deprecated_models:
                     continue
                 cooldown = self.provider_cooldowns.get(p, 0)

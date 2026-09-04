@@ -21,16 +21,15 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger("llm_circuit_breaker.pools")
 
 
-def load_all_env_keys() -> Dict[str, str]:
+def load_all_env_keys(target_keys: Optional[List[str]] = None) -> Dict[str, str]:
     """Scan process environment and config files for API keys."""
     keys: Dict[str, str] = {}
-    target_keys = [
-        "CEREBRAS_API_KEY",
-        "GROQ_API_KEY",
-        "OPENROUTER_API_KEY",
-        "MISTRAL_API_KEY",
-        "NVIDIA_API_KEY",
-    ]
+    if target_keys is None:
+        target_keys = [
+            "NVIDIA_API_KEY",
+            "GROQ_API_KEY",
+            "OPENROUTER_API_KEY",
+        ]
     for k in target_keys:
         if os.getenv(k):
             keys[k] = os.getenv(k, "").strip()
@@ -80,18 +79,18 @@ _BROWSER_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Default Coding Pool (Claude Code, Cursor, Aider) - 5 Core Providers: Cerebras, Groq, OpenRouter, Mistral, NVIDIA
+# Default Coding Pool (Claude Code, Cursor, Aider) - Core Providers: NVIDIA, Groq, OpenRouter
 DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
-    # 1. Cerebras Llama 3.3 70B (Fastest inference, high-fidelity tool calling)
+    # 1. NVIDIA NIM Llama 3.2 Vision (High-fidelity tool calling, 128k context)
     RouteDefinition(
-        id="cerebras-llama33-coding",
-        provider="cerebras",
-        model="llama3.3-70b",
+        id="nvidia-llama-coding",
+        provider="nvidia",
+        model="meta/llama-3.2-11b-vision-instruct",
         pool="coding",
-        base_url="https://api.cerebras.ai/v1",
+        base_url="https://integrate.api.nvidia.com/v1",
         api_format="openai",
-        env_key="CEREBRAS_API_KEY",
-        context_length=65536,
+        env_key="NVIDIA_API_KEY",
+        context_length=131072,
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
@@ -108,71 +107,33 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 3. OpenRouter Qwen 2.5 Coder 32B (Free specialist)
+    # 3. OpenRouter Llama 3.3 70B Instruct
     RouteDefinition(
-        id="openrouter-qwencoder-coding",
+        id="openrouter-llama33-coding",
         provider="openrouter",
-        model="qwen/qwen-2.5-coder-32b-instruct:free",
+        model="meta-llama/llama-3.3-70b-instruct",
         pool="coding",
         base_url="https://openrouter.ai/api/v1",
         api_format="openai",
         env_key="OPENROUTER_API_KEY",
-        context_length=32768,
-        max_output_tokens=8192,
-        headers={"User-Agent": _BROWSER_UA}
-    ),
-    # 4. OpenRouter Devstral 2512 (Free 256k context)
-    RouteDefinition(
-        id="openrouter-devstral-coding",
-        provider="openrouter",
-        model="mistralai/devstral-2512:free",
-        pool="coding",
-        base_url="https://openrouter.ai/api/v1",
-        api_format="openai",
-        env_key="OPENROUTER_API_KEY",
-        context_length=262144,
-        max_output_tokens=8192,
-        headers={"User-Agent": _BROWSER_UA}
-    ),
-    # 5. Mistral Codestral (256k context)
-    RouteDefinition(
-        id="mistral-codestral-coding",
-        provider="mistral",
-        model="codestral-latest",
-        pool="coding",
-        base_url="https://api.mistral.ai/v1",
-        api_format="openai",
-        env_key="MISTRAL_API_KEY",
-        context_length=256000,
-        max_output_tokens=8192,
-    ),
-    # 6. NVIDIA NIM Nemotron 3 Ultra
-    RouteDefinition(
-        id="nvidia-nemotron-coding",
-        provider="nvidia",
-        model="nvidia/nemotron-3-ultra-550b-a55b",
-        pool="coding",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_format="openai",
-        env_key="NVIDIA_API_KEY",
         context_length=131072,
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
 ]
 
-# Default General Agent Pool (Hermes Agent, OpenClaw) - 5 Core Providers: Cerebras, Groq, OpenRouter, Mistral, NVIDIA
+# Default General Agent Pool (Hermes Agent, OpenClaw) - Core Providers: NVIDIA, Groq, OpenRouter
 DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
-    # 1. Cerebras Llama 3.3 70B (Fastest conversational response)
+    # 1. NVIDIA NIM Llama 3.2 Vision (Fast inference, robust multi-turn context)
     RouteDefinition(
-        id="cerebras-llama33-agent",
-        provider="cerebras",
-        model="llama3.3-70b",
+        id="nvidia-llama32-agent",
+        provider="nvidia",
+        model="meta/llama-3.2-11b-vision-instruct",
         pool="general_agent",
-        base_url="https://api.cerebras.ai/v1",
+        base_url="https://integrate.api.nvidia.com/v1",
         api_format="openai",
-        env_key="CEREBRAS_API_KEY",
-        context_length=65536,
+        env_key="NVIDIA_API_KEY",
+        context_length=131072,
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
@@ -189,54 +150,16 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 3. Cerebras Llama 3.1 8B
-    RouteDefinition(
-        id="cerebras-llama31-agent",
-        provider="cerebras",
-        model="llama3.1-8b",
-        pool="general_agent",
-        base_url="https://api.cerebras.ai/v1",
-        api_format="openai",
-        env_key="CEREBRAS_API_KEY",
-        context_length=65536,
-        max_output_tokens=4096,
-        headers={"User-Agent": _BROWSER_UA}
-    ),
-    # 4. OpenRouter Llama 3.3 70B (Free)
+    # 3. OpenRouter Llama 3.3 70B Instruct
     RouteDefinition(
         id="openrouter-llama33-agent",
         provider="openrouter",
-        model="meta-llama/llama-3.3-70b-instruct:free",
+        model="meta-llama/llama-3.3-70b-instruct",
         pool="general_agent",
         base_url="https://openrouter.ai/api/v1",
         api_format="openai",
         env_key="OPENROUTER_API_KEY",
-        context_length=65536,
-        max_output_tokens=4096,
-        headers={"User-Agent": _BROWSER_UA}
-    ),
-    # 5. Mistral Small
-    RouteDefinition(
-        id="mistral-small-agent",
-        provider="mistral",
-        model="mistral-small-latest",
-        pool="general_agent",
-        base_url="https://api.mistral.ai/v1",
-        api_format="openai",
-        env_key="MISTRAL_API_KEY",
-        context_length=128000,
-        max_output_tokens=4096,
-    ),
-    # 6. NVIDIA Nemotron
-    RouteDefinition(
-        id="nvidia-nemotron-agent",
-        provider="nvidia",
-        model="nvidia/nemotron-3-ultra-550b-a55b",
-        pool="general_agent",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_format="openai",
-        env_key="NVIDIA_API_KEY",
-        context_length=65536,
+        context_length=131072,
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
@@ -246,8 +169,9 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
 class IsolatedPoolManager:
     """Thread-safe manager for dual-pool routing and independent cooldowns."""
 
-    def __init__(self):
+    def __init__(self, allowed_providers: Optional[Set[str]] = None):
         self._lock = threading.RLock()
+        self.allowed_providers: Optional[Set[str]] = {p.lower() for p in allowed_providers} if allowed_providers else None
         self.keys = load_all_env_keys()
 
         self.coding_routes: List[RouteDefinition] = list(DEFAULT_CODING_ROUTES)
@@ -283,6 +207,14 @@ class IsolatedPoolManager:
             self.exhausted_quotas[key] = time.time() + seconds
             logger.warning("[🛑 QUOTA EXHAUSTED] Pool '%s' route '%s' locked out for %.1fh", pool, route_id, seconds / 3600)
 
+    def clear_cooldown(self, provider: str, pool: Optional[str] = None) -> None:
+        """Clear active cooldown for a provider."""
+        with self._lock:
+            p = provider.lower()
+            keys_to_del = [k for k in self.cooldowns if k[1] == p and (pool is None or k[0] == pool.lower())]
+            for k in keys_to_del:
+                del self.cooldowns[k]
+
     def mark_deprecated(self, pool: str, model: str) -> None:
         """Permanently skip model in this pool for current process lifecycle."""
         with self._lock:
@@ -297,6 +229,9 @@ class IsolatedPoolManager:
             valid: List[RouteDefinition] = []
 
             for r in routes:
+                if self.allowed_providers is not None and r.provider.lower() not in self.allowed_providers:
+                    continue
+
                 # If route requires an API key, only activate if the user exported a valid, non-empty key!
                 # If key is missing, simply skip this provider without failing the fallback!
                 if r.env_key:
