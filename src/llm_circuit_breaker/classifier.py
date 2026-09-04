@@ -64,6 +64,16 @@ _SSL_PATTERNS = [
     "ssLError",
 ]
 
+_OUTPUT_CAP_PATTERNS = [
+    "must be less than or equal to",
+    "less than or equal to",
+    "range of max_tokens should be",
+    "maximum output tokens",
+    "available_tokens",
+    "available tokens",
+    "max_tokens is less than the context_window",
+]
+
 _CONTEXT_OVERFLOW_PATTERNS = [
     "context_length_exceeded",
     "payload too large",
@@ -71,7 +81,43 @@ _CONTEXT_OVERFLOW_PATTERNS = [
     "token count exceeds limit",
     "request size exceeds",
     "too many tokens",
+    "prompt is too long",
+    "prompt too long",
 ]
+
+
+def parse_output_cap_from_error(error_msg: str) -> Optional[int]:
+    """Extract integer output token limit from provider error strings."""
+    import re
+
+    msg = str(error_msg).lower()
+
+    # 1. Groq / generic less than or equal:
+    # `max_tokens` must be less than or equal to `16384`
+    m = re.search(r"max_tokens[`'\"]?\s+must be less than or equal to\s+[`'\"]?(\d+)", msg)
+    if m:
+        return int(m.group(1))
+
+    m = re.search(r"less than or equal to\s+[`'\"]?(\d+)", msg)
+    if m and ("max_tokens" in msg or "token" in msg):
+        return int(m.group(1))
+
+    # 2. DashScope / Alibaba range: "Range of max_tokens should be [1, 65536]"
+    m = re.search(r"range of max_tokens should be\s*\[\s*\d+\s*,\s*(\d+)\s*\]", msg)
+    if m:
+        return int(m.group(1))
+
+    # 3. Model maximum output tokens: "exceeds model's maximum output tokens (65536)"
+    m = re.search(r"exceeds model(?:'s)? maximum output tokens\s*\(?\s*(\d+)\s*\)?", msg)
+    if m:
+        return int(m.group(1))
+
+    # 4. Anthropic / OpenRouter available_tokens
+    m = re.search(r"available[_\s]+tokens[:\s]+(\d+)", msg)
+    if m:
+        return int(m.group(1))
+
+    return None
 
 _SCHEMA_INCOMPATIBILITY_PATTERNS = [
     "unrecognized parameter",
@@ -190,7 +236,19 @@ def classify_failure(
             message=msg,
         )
 
-    # 3. Context Length / Payload Overflow (Request Incompatibility / Sizing)
+    # 3. Output Token Cap Exceeded (Request Incompatibility / Output Sizing)
+    if (code in (400, 429) or code is None) and any(p in msg for p in _OUTPUT_CAP_PATTERNS):
+        return FailureClassification(
+            category=FailureCategory.REQUEST_INCOMPATIBILITY,
+            reason=FailoverReason.output_cap_exceeded,
+            should_fallback=True,
+            retryable=True,
+            poisons_health=False,  # Output cap mismatch does not mean provider infra is down!
+            status_code=code or 400,
+            message=msg,
+        )
+
+    # 4. Context Length / Payload Overflow (Request Incompatibility / Sizing)
     if code == 413 or any(p in msg for p in _CONTEXT_OVERFLOW_PATTERNS):
         return FailureClassification(
             category=FailureCategory.REQUEST_INCOMPATIBILITY,

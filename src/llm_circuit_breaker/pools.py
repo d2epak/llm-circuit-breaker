@@ -38,12 +38,16 @@ def load_all_env_keys() -> Dict[str, str]:
     for candidate in [
         Path.home() / ".claude" / ".env",
         Path.home() / ".hermes" / ".env",
+        Path.home() / ".hermes" / "profiles" / "cos" / ".env",
+        Path.home() / ".zshrc",
     ]:
         if candidate.exists():
             try:
-                with open(candidate, "r", encoding="utf-8") as f:
+                with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         line = line.strip()
+                        if line.startswith("export "):
+                            line = line[7:].strip()
                         if "=" in line and not line.startswith("#"):
                             k, v = line.split("=", 1)
                             k = k.strip()

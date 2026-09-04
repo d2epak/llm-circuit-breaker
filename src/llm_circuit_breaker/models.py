@@ -31,6 +31,8 @@ class FailoverReason(str, Enum):
     timeout = "timeout"
     ssl_cert_verification = "ssl_cert_verification"
     payload_too_large = "payload_too_large"
+    output_cap_exceeded = "output_cap_exceeded"
+    context_overflow = "context_overflow"
     waf_blocked = "waf_blocked"
     connection_refused = "connection_refused"
     schema_incompatible = "schema_incompatible"

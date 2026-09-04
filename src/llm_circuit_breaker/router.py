@@ -11,7 +11,11 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from llm_circuit_breaker.classifier import classify_api_error, FailoverReason
+from llm_circuit_breaker.classifier import (
+    classify_api_error,
+    FailoverReason,
+    parse_output_cap_from_error,
+)
 from llm_circuit_breaker.pools import POOL_MANAGER, RouteDefinition
 from llm_circuit_breaker.pruner import prune_openai_request
 from llm_circuit_breaker.translators import (
@@ -228,6 +232,20 @@ class UniversalFailoverRouter:
                 "[%s] Upstream error from %s (%d): %s (classified as: %s)",
                 pool.upper(), route.provider, status, classified.message[:160], classified.reason
             )
+
+            # Auto-clamp output cap if provider reported one
+            if classified.reason == FailoverReason.output_cap_exceeded:
+                raw_body = body.decode("utf-8", errors="ignore")
+                cap = parse_output_cap_from_error(raw_body)
+                current_max = openai_payload.get("max_tokens")
+                if cap and cap > 0 and (current_max is None or current_max > cap):
+                    clamped_tokens = max(1, cap - 64) if cap > 64 else cap
+                    logger.info(
+                        "Auto-clamping output tokens to %d for %s (reported cap: %d) and retrying...",
+                        clamped_tokens, route.provider, cap
+                    )
+                    openai_payload["max_tokens"] = clamped_tokens
+                    continue
 
             if classified.reason == FailoverReason.billing:
                 self.pool_manager.mark_quota_exhausted(pool, route.id, 86400)
