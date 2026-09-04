@@ -94,11 +94,11 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 2. Groq Llama 3.3 70B Versatile (128k context)
+    # 2. Groq Llama 3.1 8B Instant (128k context, fast inference)
     RouteDefinition(
-        id="groq-llama33-coding",
+        id="groq-llama31-coding",
         provider="groq",
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         pool="coding",
         base_url="https://api.groq.com/openai/v1",
         api_format="openai",
@@ -107,11 +107,11 @@ DEFAULT_CODING_ROUTES: List[RouteDefinition] = [
         max_output_tokens=8192,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 3. OpenRouter Llama 3.3 70B Instruct
+    # 3. OpenRouter Nemotron Free (Zero-credit resilient route)
     RouteDefinition(
-        id="openrouter-llama33-coding",
+        id="openrouter-nemotron-coding",
         provider="openrouter",
-        model="meta-llama/llama-3.3-70b-instruct",
+        model="nvidia/nemotron-3-ultra-550b-a55b:free",
         pool="coding",
         base_url="https://openrouter.ai/api/v1",
         api_format="openai",
@@ -137,11 +137,11 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 2. Groq Llama 3.3 70B Versatile
+    # 2. Groq Llama 3.1 8B Instant (128k context)
     RouteDefinition(
-        id="groq-llama33-agent",
+        id="groq-llama31-agent",
         provider="groq",
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         pool="general_agent",
         base_url="https://api.groq.com/openai/v1",
         api_format="openai",
@@ -150,11 +150,11 @@ DEFAULT_AGENT_ROUTES: List[RouteDefinition] = [
         max_output_tokens=4096,
         headers={"User-Agent": _BROWSER_UA}
     ),
-    # 3. OpenRouter Llama 3.3 70B Instruct
+    # 3. OpenRouter Nemotron Free (Zero-credit resilient route)
     RouteDefinition(
-        id="openrouter-llama33-agent",
+        id="openrouter-nemotron-agent",
         provider="openrouter",
-        model="meta-llama/llama-3.3-70b-instruct",
+        model="nvidia/nemotron-3-ultra-550b-a55b:free",
         pool="general_agent",
         base_url="https://openrouter.ai/api/v1",
         api_format="openai",
